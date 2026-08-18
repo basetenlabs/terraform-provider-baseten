@@ -1,0 +1,22 @@
+---
+page_title: "Provider: Baseten"
+description: |-
+{{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# Baseten Provider
+
+{{ .Description | trimspace }}
+
+## Example Usage
+
+{{ tffile "examples/provider/provider.tf" }}
+
+## Where to start
+
+- [Getting started](guides/getting-started) deploys a model and tunes its
+  environment from scratch.
+- [Adopting existing models](guides/adopting-existing-models) brings models the
+  CLI or dashboard already created under Terraform.
+
+{{ .SchemaMarkdown | trimspace }}
