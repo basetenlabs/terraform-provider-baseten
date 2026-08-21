@@ -109,7 +109,8 @@ environments = {
 ```
 
 - An environment the configuration never names is left alone, so one created in
-  the dashboard survives.
+  the dashboard survives. Dropping `production` therefore stops managing it
+  rather than deleting it, which Baseten does not allow.
 - Settings left out of an entry keep their current value. Baseten has no way to
   reset a setting to its default, so deleting a line does nothing and the plan
   warns when a value in state stops being configured.

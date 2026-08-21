@@ -271,8 +271,20 @@ func (r *modelResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		for name := range stateEnvironments {
+		for _, name := range modelSortedNames(stateEnvironments) {
 			if _, kept := configEnvironments[name]; kept {
+				continue
+			}
+			// Baseten refuses to delete production, so removing it only stops
+			// Terraform managing it. Reporting it as a protected deletion would
+			// send the user to turn off a flag that changes nothing.
+			if name == modelProductionEnvironmentName {
+				resp.Diagnostics.AddAttributeWarning(
+					path.Root("environments"),
+					"Production environment cannot be deleted",
+					"Removing production from environments stops Terraform managing its settings. Baseten does "+
+						"not allow deleting the production environment, so it stays as it is.",
+				)
 				continue
 			}
 			if plan.EnvironmentDeletionProtection.ValueBool() {
@@ -931,6 +943,11 @@ func (r *modelResource) reconcileEnvironments(
 	if deleteRemoved {
 		for _, name := range modelSortedNames(priorEntries) {
 			if _, kept := plannedEntries[name]; kept {
+				continue
+			}
+			// Baseten rejects deleting production, so removing it from the
+			// configuration just stops managing it. ModifyPlan already said so.
+			if name == modelProductionEnvironmentName {
 				continue
 			}
 			if _, err := r.client.API().DeleteModelsEnvironments(ctx, modelID, name); err != nil {

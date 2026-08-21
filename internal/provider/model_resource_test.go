@@ -240,26 +240,34 @@ func TestModelResourceCreateMissingModelNamesIt(t *testing.T) {
 
 func TestModelResourceModifyPlanEnvironmentDeletionProtection(t *testing.T) {
 	tests := []struct {
-		name       string
-		protection bool
-		wantError  bool
+		name        string
+		environment string
+		protection  bool
+		wantError   bool
+		wantWarning bool
 	}{
-		{name: "ProtectedRemovalFails", protection: true, wantError: true},
-		{name: "UnprotectedRemovalPlans", protection: false},
+		{name: "ProtectedRemovalFails", environment: "staging", protection: true, wantError: true},
+		{name: "UnprotectedRemovalPlans", environment: "staging", protection: false},
+		// Baseten refuses to delete production either way, so removing it warns
+		// rather than erroring. Erroring would send the user to turn off a flag
+		// that only leads to a failing apply.
+		{name: "ProtectedProductionRemovalWarns", environment: "production", protection: true, wantWarning: true},
+		{name: "UnprotectedProductionRemovalWarns", environment: "production", protection: false, wantWarning: true},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			r, _, modelSchema := testModelResource(t, nil)
 
-			// Prior state manages staging; the configuration no longer mentions it.
+			// Prior state manages the environment; the configuration no longer
+			// mentions it.
 			state := tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
 				ID:                            types.StringValue("model-1"),
 				Name:                          types.StringValue("whisper"),
 				EnvironmentDeletionProtection: types.BoolValue(test.protection),
 				CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
 				Environments: testModelEnvironments(t, map[string]modelEnvironmentModel{
-					"staging": {},
+					test.environment: {},
 				}),
 			})}
 
@@ -290,7 +298,44 @@ func TestModelResourceModifyPlanEnvironmentDeletionProtection(t *testing.T) {
 			if resp.Diagnostics.HasError() {
 				t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
 			}
+			if got := resp.Diagnostics.WarningsCount() > 0; got != test.wantWarning {
+				t.Fatalf("got warnings %v, want %v: %v", got, test.wantWarning, resp.Diagnostics)
+			}
 		})
+	}
+}
+
+// TestModelResourceReconcileSkipsProductionDeletion covers the apply side of the
+// same rule: production dropped from the configuration is left alone rather than
+// deleted, which Baseten rejects outright.
+func TestModelResourceReconcileSkipsProductionDeletion(t *testing.T) {
+	production := testAPIEnvironment(t, "production", 1)
+	staging := testAPIEnvironment(t, "staging", 0)
+
+	r, fake, _ := testModelResource(t, map[string]any{
+		"GET /v1/models/model-1/environments": managementapi.Environments{
+			Environments: []managementapi.Environment{production, staging},
+		},
+		"DELETE /v1/models/model-1/environments/staging": map[string]any{},
+	})
+
+	// Both were managed; the configuration now names neither, with protection off.
+	prior := testModelEnvironments(t, map[string]modelEnvironmentModel{
+		"production": {},
+		"staging":    {},
+	})
+	planned := testModelEnvironments(t, map[string]modelEnvironmentModel{})
+
+	_, diags := r.reconcileEnvironments(t.Context(), "model-1", planned, prior, true)
+	if diags.HasError() {
+		t.Fatalf("got diagnostics %v, want none", diags)
+	}
+
+	if got := fake.requestsTo("DELETE", "/v1/models/model-1/environments/production"); len(got) > 0 {
+		t.Errorf("got %d deletes of production, want none", len(got))
+	}
+	if got := fake.requestsTo("DELETE", "/v1/models/model-1/environments/staging"); len(got) != 1 {
+		t.Errorf("got %d deletes of staging, want 1", len(got))
 	}
 }
 
