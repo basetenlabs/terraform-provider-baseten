@@ -1,5 +1,5 @@
-# Managed mode: Terraform owns the model's code, creating the model if it does
-# not exist and pushing whenever the source changes.
+# Managed mode: Terraform owns the model's source and lifetime, creating the
+# model if it does not exist and pushing whenever the source changes.
 resource "baseten_model" "phi_3_mini" {
   name = "Phi 3 Mini"
 

@@ -1,8 +1,7 @@
 ---
 page_title: "Getting started"
-subcategory: "Guides"
 description: |-
-  Deploy a model to Baseten with Terraform and tune the environment serving it.
+  Configure the Baseten provider and pick between adopted and managed models.
 ---
 
 # Getting started
@@ -28,114 +27,61 @@ Export a [Baseten API key](https://docs.baseten.co/organization/api-keys):
 export BASETEN_API_KEY="..."
 ```
 
-## Deploy a model
+`baseten_model` has two modes, and the difference is whether Terraform owns the
+model's source and lifetime.
 
-Most models are configuration alone. This one has vLLM serve pinned Qwen
-weights, so `push.config` carries everything and there is nothing to upload.
+## Adopted models
 
-On the first apply, Terraform creates the model and pushes it, because Baseten
-has no model without a deployment.
-
-```terraform
-resource "baseten_model" "qwen_2_5_3b" {
-  name = "Qwen-2.5-3B"
-
-  push = {
-    config = {
-      model_metadata = {
-        tags = ["openai-compatible"]
-      }
-      base_image = {
-        image = "vllm/vllm-openai:v0.27.1"
-      }
-      docker_server = {
-        start_command      = "vllm serve /models/qwen --served-model-name Qwen/Qwen2.5-3B-Instruct --host 0.0.0.0 --port 8000"
-        readiness_endpoint = "/health"
-        liveness_endpoint  = "/health"
-        predict_endpoint   = "/v1/chat/completions"
-        server_port        = 8000
-      }
-      weights = [{
-        source         = "hf://Qwen/Qwen2.5-3B-Instruct@aa8e72537993ba99e69dfaafa59ed015b17504d1"
-        mount_location = "/models/qwen"
-      }]
-      resources = {
-        instance_type = "L4:4x16"
-      }
-      runtime = {
-        predict_concurrency = 256
-      }
-    }
-
-    environment = "production"
-    wait        = true
-  }
-}
-```
-
-`wait = true` holds the apply until the deployment is active. Without it the
-apply returns as soon as the deployment is created.
-
-A model that is more than a `config.yaml`, whether that is `model/model.py`,
-data files, or vendored packages, takes `config_dir` instead and points at the
-directory. Everything below applies either way.
-
-## Deploy a change
-
-Bump the vLLM image and plan. The provider hashes the configuration, so the plan
-reports a push:
-
-```text
-Warning: A new deployment will be pushed
-
-Applying this pushes a new deployment.
-```
-
-Editing `labels` or `deployment_name` instead reports no push, because those
-apply to the next one. See
-[What causes a push](../resources/model#what-causes-a-push).
-
-## Tune the environment
-
-`environments` manages settings on the environment rather than on any one
-deployment, so they survive every later push.
+Without `push`, the model has to already exist, from `baseten model push` or the
+dashboard. Terraform manages only the environments the configuration names:
+nothing is created, nothing is deployed, and a destroy forgets the model.
 
 ```terraform
 resource "baseten_model" "qwen_2_5_3b" {
   name = "Qwen-2.5-3B"
-
-  push = {
-    # ...
-    environment = "production"
-    wait        = true
-  }
 
   environments = {
     production = {
       autoscaling = {
-        min_replica      = 1
-        max_replica      = 5
-        scale_down_delay = 900
-      }
-    }
-
-    # Created by this apply.
-    staging = {
-      autoscaling = {
-        min_replica = 0
-        max_replica = 2
+        min_replica = 1
+        max_replica = 5
       }
     }
   }
 }
 ```
 
-Settings are written before the push in the same apply, so a rollout uses them.
+See the [Adopted models](adopted-models) guide. To have Terraform own the
+model's source and lifetime instead, see the [Managed models](managed-models)
+guide.
 
-## Add a secret
+## Managed models
 
-Gated weights need a Hugging Face token. Terraform cannot see the reference,
-which lives in the model's configuration, so declare the ordering yourself.
+With `push`, Terraform owns the model's source and lifetime. It creates the model
+if it does not exist, pushes a new deployment whenever the source changes, and
+can delete the model on destroy once `deletion_protection` is off.
+
+```terraform
+resource "baseten_model" "qwen_2_5_3b" {
+  name = "Qwen-2.5-3B"
+
+  push = {
+    config_dir = "${path.module}/qwen-2.5-3b"
+    wait       = true
+  }
+}
+```
+
+See the [Managed models](managed-models) guide. To manage settings on a model
+that already exists and leave its source and lifetime alone, see the
+[Adopted models](adopted-models) guide.
+
+Both modes manage `environments` the same way, and a model can move between
+modes later.
+
+## Secrets
+
+Secrets belong to the workspace, so they work the same in either mode.
 
 ```terraform
 resource "baseten_secret" "hf_access_token" {
@@ -143,46 +89,12 @@ resource "baseten_secret" "hf_access_token" {
   value_wo         = var.hf_access_token
   value_wo_version = 1
 }
-
-resource "baseten_model" "llama_3_2_1b" {
-  name = "Llama 3.2 1B"
-
-  push = {
-    config = {
-      # ...
-      weights = [{
-        source         = "hf://meta-llama/Llama-3.2-1B-Instruct@main"
-        mount_location = "/models/llama"
-        auth = {
-          auth_method      = "CUSTOM_SECRET"
-          auth_secret_name = "hf_access_token"
-        }
-      }]
-    }
-  }
-
-  depends_on = [baseten_secret.hf_access_token]
-}
 ```
 
-Adding the `auth` block edits the configuration, so that apply pushes a new
-deployment. Rotating the secret's value later does not, since nothing about the
-model changed. Add a `push.triggers` entry to redeploy on a rotation.
-
-## Tear it down
-
-Both protection flags default to true and are read out of state, so turn off
-what you mean to delete and apply before destroying.
-
-```terraform
-resource "baseten_model" "qwen_2_5_3b" {
-  deletion_protection = false
-  # ...
-}
-```
+`value_wo` is write-only, so the value reaches neither state nor plan files.
+Increment `value_wo_version` to rotate. Rotating deploys nothing.
 
 ## Next
 
-- [Adopting existing models](adopting-existing-models), for models the CLI or
-  dashboard already created.
-- [`baseten_model`](../resources/model) for the full attribute reference.
+- [`baseten_model`](../resources/model) and [`baseten_secret`](../resources/secret)
+  for the full attribute reference.

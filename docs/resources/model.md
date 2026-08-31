@@ -4,7 +4,7 @@ subcategory: ""
 description: |-
   A Baseten model, in one of two modes.
   Adopted, without push: the model has to already exist, and Terraform manages only its environment settings. Nothing is ever created or deleted, and destroying the resource forgets the model rather than removing it.
-  Managed, with push: Terraform owns the model's code. It creates the model if it does not exist, pushes a new deployment whenever the source changes, and can delete the model on destroy once deletion_protection is off.
+  Managed, with push: Terraform owns the model's source and lifetime. It creates the model if it does not exist, pushes a new deployment whenever the source changes, and can delete the model on destroy once deletion_protection is off.
   Adding push to a model Terraform already adopted moves it between these modes, which changes what an apply and a destroy can do. The plan warns when that happens.
   environments is exhaustive over what Terraform manages, not over what exists. An environment the configuration never mentions is left alone, so a model can be partly managed here and partly elsewhere.
 ---
@@ -15,7 +15,7 @@ A Baseten model, in one of two modes.
 
 **Adopted**, without `push`: the model has to already exist, and Terraform manages only its environment settings. Nothing is ever created or deleted, and destroying the resource forgets the model rather than removing it.
 
-**Managed**, with `push`: Terraform owns the model's code. It creates the model if it does not exist, pushes a new deployment whenever the source changes, and can delete the model on destroy once `deletion_protection` is off.
+**Managed**, with `push`: Terraform owns the model's source and lifetime. It creates the model if it does not exist, pushes a new deployment whenever the source changes, and can delete the model on destroy once `deletion_protection` is off.
 
 Adding `push` to a model Terraform already adopted moves it between these modes, which changes what an apply and a destroy can do. The plan warns when that happens.
 
@@ -23,11 +23,40 @@ Adding `push` to a model Terraform already adopted moves it between these modes,
 
 ## Example Usage
 
+### Adopted, managing environments only
+
+```terraform
+# Adopted mode: no push block, so the model has to already exist and Terraform
+# manages only its settings. Destroying this forgets the model, never deletes it.
+resource "baseten_model" "qwen_2_5_3b" {
+  name = "Qwen-2.5-3B"
+
+  # Only these are managed. An environment created in the dashboard and never
+  # listed here is left alone.
+  environments = {
+    production = {
+      autoscaling = {
+        min_replica = 2
+        max_replica = 20
+      }
+    }
+
+    # Created on the first apply if it does not exist yet.
+    staging = {
+      autoscaling = {
+        min_replica = 0
+        max_replica = 2
+      }
+    }
+  }
+}
+```
+
 ### Managed, from a model directory
 
 ```terraform
-# Managed mode: Terraform owns the model's code, creating the model if it does
-# not exist and pushing whenever the source changes.
+# Managed mode: Terraform owns the model's source and lifetime, creating the
+# model if it does not exist and pushing whenever the source changes.
 resource "baseten_model" "phi_3_mini" {
   name = "Phi 3 Mini"
 
@@ -121,35 +150,6 @@ resource "baseten_model" "qwen_2_5_3b" {
       }
       runtime = {
         predict_concurrency = 256
-      }
-    }
-  }
-}
-```
-
-### Adopted, managing environments only
-
-```terraform
-# Adopted mode: no push block, so the model has to already exist and Terraform
-# manages only its settings. Destroying this forgets the model, never deletes it.
-resource "baseten_model" "qwen_2_5_3b" {
-  name = "Qwen-2.5-3B"
-
-  # Only these are managed. An environment created in the dashboard and never
-  # listed here is left alone.
-  environments = {
-    production = {
-      autoscaling = {
-        min_replica = 2
-        max_replica = 20
-      }
-    }
-
-    # Created on the first apply if it does not exist yet.
-    staging = {
-      autoscaling = {
-        min_replica = 0
-        max_replica = 2
       }
     }
   }

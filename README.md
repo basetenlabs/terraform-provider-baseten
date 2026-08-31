@@ -3,10 +3,11 @@
 [![CI](https://github.com/basetenlabs/terraform-provider-baseten/actions/workflows/ci.yml/badge.svg)](https://github.com/basetenlabs/terraform-provider-baseten/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/basetenlabs/terraform-provider-baseten)](LICENSE)
 
-Terraform and OpenTofu provider for [Baseten](https://baseten.co). Deploys models, manages their environments,
-and manages workspace secrets.
+Terraform and OpenTofu provider for [Baseten](https://baseten.co). Manages the environments of models that
+already exist, manages workspace secrets, and can own a model's source and deploy it.
 
-[Provider documentation](docs/), including a [getting started guide](docs/guides/getting-started.md).
+[Provider documentation](docs/), including a [getting started guide](docs/guides/getting-started.md),
+[adopted models](docs/guides/adopted-models.md), and [managed models](docs/guides/managed-models.md).
 
 ⚠️ Resources and attributes may change between releases until this provider reaches 1.0.
 
@@ -52,28 +53,14 @@ normally.
 
 Authenticate with `BASETEN_API_KEY` in the environment, or set `api_key` on the provider.
 
-### Deploy a model
+`baseten_model` has two modes, and the difference is whether Terraform owns the model's source and lifetime.
 
-`push` makes Terraform own the model's code. It creates the model on the first apply and pushes a new deployment
-whenever the source changes.
+### Adopted models
 
-```hcl
-resource "baseten_model" "phi_3_mini" {
-  name = "Phi 3 Mini"
-
-  push = {
-    config_dir = "${path.module}/phi-3-mini"
-    wait       = true
-  }
-}
-```
-
-A model that is only a `config.yaml` can skip the directory and write `push.config` inline instead.
-
-### Manage environments
-
-`environments` manages settings on the environment rather than on any one deployment, so they survive later
-pushes. Only what you name is managed, and settings you leave out keep their current values.
+Without `push`, the model has to already exist and Terraform manages only the environments the configuration
+names. Nothing is created, nothing is deployed, and a destroy forgets the model. Settings live on the
+environment rather than on any one deployment, so they survive later pushes, and settings left out keep their
+current values.
 
 ```hcl
 resource "baseten_model" "phi_3_mini" {
@@ -90,7 +77,26 @@ resource "baseten_model" "phi_3_mini" {
 }
 ```
 
-Without `push`, this adopts a model that already exists and never deploys to it.
+See the [adopted models guide](docs/guides/adopted-models.md).
+
+### Managed models
+
+With `push`, Terraform owns the model's source and lifetime. It creates the model on the first apply and pushes
+a new deployment whenever the source changes.
+
+```hcl
+resource "baseten_model" "phi_3_mini" {
+  name = "Phi 3 Mini"
+
+  push = {
+    config_dir = "${path.module}/phi-3-mini"
+    wait       = true
+  }
+}
+```
+
+A model that is configuration alone can skip the directory and write `push.config` inline instead. See the
+[managed models guide](docs/guides/managed-models.md).
 
 ### Manage secrets
 

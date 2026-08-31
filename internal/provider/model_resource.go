@@ -98,7 +98,7 @@ func (r *modelResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 			"**Adopted**, without `push`: the model has to already exist, and Terraform manages only its " +
 			"environment settings. Nothing is ever created or deleted, and destroying the resource forgets " +
 			"the model rather than removing it.\n\n" +
-			"**Managed**, with `push`: Terraform owns the model's code. It creates the model if it does not " +
+			"**Managed**, with `push`: Terraform owns the model's source and lifetime. It creates the model if it does not " +
 			"exist, pushes a new deployment whenever the source changes, and can delete the model on destroy " +
 			"once `deletion_protection` is off.\n\n" +
 			"Adding `push` to a model Terraform already adopted moves it between these modes, which changes " +

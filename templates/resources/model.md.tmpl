@@ -11,6 +11,10 @@ description: |-
 
 ## Example Usage
 
+### Adopted, managing environments only
+
+{{ tffile "examples/resources/baseten_model/resource-adopted.tf" }}
+
 ### Managed, from a model directory
 
 {{ tffile "examples/resources/baseten_model/resource-managed-dir.tf" }}
@@ -42,10 +46,6 @@ Models built from configuration alone need no directory. Inline `config` cannot
 carry model code, and comments in it are not preserved.
 
 {{ tffile "examples/resources/baseten_model/resource-managed-inline.tf" }}
-
-### Adopted, managing environments only
-
-{{ tffile "examples/resources/baseten_model/resource-adopted.tf" }}
 
 ## What causes a push
 
