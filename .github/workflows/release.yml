@@ -1,0 +1,50 @@
+# Builds, signs, and publishes a release when a v* tag is pushed. The Terraform
+# Registry picks it up from the GitHub release through a webhook, so this is the
+# only step needed to ship a version.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Creating a release and uploading its assets counts as writing contents.
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    # To require an approval before the signing key is handed to a run, create a
+    # `release` environment with reviewers and add `environment: release` here.
+    steps:
+      # Actions are pinned by digest, because this job holds the signing key.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # goreleaser reads earlier tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # CI runs on branches, not tags, so nothing else has checked this commit.
+      # Acceptance tests are left out: they deploy real models.
+      - name: Test
+        run: go test ./...
+
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        id: import_gpg
+        with:
+          gpg_private_key: ${{ secrets.TERRAFORM_PRIVATE_KEY }}
+          passphrase: ${{ secrets.TERRAFORM_PASSPHRASE }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}

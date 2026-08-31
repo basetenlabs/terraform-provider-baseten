@@ -6,48 +6,30 @@
 Terraform and OpenTofu provider for [Baseten](https://baseten.co). Manages the environments of models that
 already exist, manages workspace secrets, and can own a model's source and deploy it.
 
-[Provider documentation](docs/), including a [getting started guide](docs/guides/getting-started.md),
-[adopted models](docs/guides/adopted-models.md), and [managed models](docs/guides/managed-models.md).
+[Provider documentation](https://registry.terraform.io/providers/basetenlabs/baseten/latest/docs), including a
+[getting started guide](https://registry.terraform.io/providers/basetenlabs/baseten/latest/docs/guides/getting-started),
+[adopted models](https://registry.terraform.io/providers/basetenlabs/baseten/latest/docs/guides/adopted-models),
+and [managed models](https://registry.terraform.io/providers/basetenlabs/baseten/latest/docs/guides/managed-models).
 
 ⚠️ Resources and attributes may change between releases until this provider reaches 1.0.
 
 ## Installation
 
-Not yet published to the Terraform Registry, so build it and point Terraform at your build.
+Terraform resolves a bare `baseten` to `hashicorp/baseten`, so spell the source address out:
 
-1. Build the provider:
+```hcl
+terraform {
+  required_providers {
+    baseten = {
+      source  = "basetenlabs/baseten"
+      version = "~> 0.1"
+    }
+  }
+}
+```
 
-       go build -o "$(go env GOPATH)/bin/terraform-provider-baseten" .
-
-2. Add a `dev_overrides` block to `~/.terraformrc`, naming the directory holding that binary:
-
-   ```hcl
-   provider_installation {
-     dev_overrides {
-       "basetenlabs/baseten" = "/home/you/go/bin"
-     }
-     direct {}
-   }
-   ```
-
-3. Declare the provider, without a version constraint. Terraform resolves a bare `baseten` to
-   `hashicorp/baseten`, so the source address has to be spelled out for the override to match:
-
-   ```hcl
-   terraform {
-     required_providers {
-       baseten = {
-         source = "basetenlabs/baseten"
-       }
-     }
-   }
-   ```
-
-4. Run `terraform plan` directly. Do not run `terraform init`, which fails trying to fetch a provider the
-   registry does not have yet. Every command warns that development overrides are in effect.
-
-Once the provider is published, delete the `dev_overrides` block, add a version constraint, and `terraform init`
-normally.
+Then `terraform init`. OpenTofu uses the same address, from
+[its own registry](https://search.opentofu.org/provider/basetenlabs/baseten).
 
 ## Usage
 
