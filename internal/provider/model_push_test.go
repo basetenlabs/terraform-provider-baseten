@@ -193,6 +193,53 @@ func TestModelPushSourceHashesInlineConfig(t *testing.T) {
 	}
 }
 
+// TestModelPushInlineAndDirectorySourcesDiffer settles what moving between the
+// two ways of writing the same model does. It pushes, and it has to: the same
+// configuration written in HCL and written as YAML are equal only in intent, and
+// nothing here can prove the resulting model is the same one. What the plan must
+// not do is call it an edit to config.yaml, since no file changed, so the
+// inventory names an inline config as itself and the swap reads as a swap.
+func TestModelPushInlineAndDirectorySourcesDiffer(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+
+	directorySource, diags := modelPushResolveSource(t.Context(),
+		modelPushModel{ConfigDir: types.StringValue(dir)}, "whisper")
+	if diags.HasError() {
+		t.Fatalf("resolving directory source: %v", diags)
+	}
+	defer directorySource.Close()
+
+	inlineSource, diags := modelPushResolveSource(t.Context(),
+		modelPushModel{Config: testModelConfig(t, "whisper")}, "whisper")
+	if diags.HasError() {
+		t.Fatalf("resolving inline source: %v", diags)
+	}
+	defer inlineSource.Close()
+
+	directoryHashes, err := directorySource.Hashes(t.Context())
+	if err != nil {
+		t.Fatalf("hashing directory source: %v", err)
+	}
+	inlineHashes, err := inlineSource.Hashes(t.Context())
+	if err != nil {
+		t.Fatalf("hashing inline source: %v", err)
+	}
+
+	if inlineHashes.OverallHash() == directoryHashes.OverallHash() {
+		t.Error("got the same hash for an inline config and a directory, want different: " +
+			"the provider cannot claim the two produce the same model")
+	}
+	if _, named := inlineHashes.Files[modelPushConfigFileName]; named {
+		t.Errorf("got inventory %v, want it not to name config.yaml: no file changed",
+			inlineHashes.Files)
+	}
+	summary := inlineHashes.ChangeSummary(directoryHashes)
+	if !strings.Contains(summary, "added "+modelPushInlineConfigLabel) ||
+		!strings.Contains(summary, "removed "+modelPushConfigFileName) {
+		t.Errorf("got summary %q, want it to read as one source swapped for another", summary)
+	}
+}
+
 // TestModelPushInlineSourceCleansUp covers the synthesized directory not being
 // left behind, since one is written on every plan that hashes an inline config.
 func TestModelPushInlineSourceCleansUp(t *testing.T) {

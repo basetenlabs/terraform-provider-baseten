@@ -360,15 +360,26 @@ func modelPromotionUpdate(ctx context.Context, object types.Object) (*management
 	return &update, diags
 }
 
-// modelMergeSettings prefers configured values over what was just read back.
-// Environment settings apply asynchronously, so a read taken right after a write
-// can still report the old value, and returning it would fail the apply with an
-// inconsistent-result error. Anything the configuration did not set comes from
-// the read.
+// modelMergeSettings decides what an apply records for a setting: what Baseten
+// reports where the plan left a value unknown, and the planned value everywhere
+// else. Terraform requires an apply to return every value its plan settled, so
+// the planned value has to win even where the read disagrees, and even where the
+// plan settled a null. Two things make the read disagree: settings apply
+// asynchronously, so a read taken right after a write can still report the old
+// value, and Baseten can move a setting nobody asked about. Neither is lost,
+// because the next refresh reports it as drift, which is where Terraform expects
+// to hear about it.
+//
+// An unknown planned value is Terraform asking the apply to fill it in, which is
+// every setting of a newly created environment and every setting the
+// configuration leaves out on one.
 func modelMergeSettings(ctx context.Context, planned, fetched types.Object) (types.Object, diag.Diagnostics) {
 	var diags diag.Diagnostics
-	if planned.IsNull() || planned.IsUnknown() || fetched.IsNull() || fetched.IsUnknown() {
+	if planned.IsUnknown() {
 		return fetched, diags
+	}
+	if planned.IsNull() || fetched.IsNull() || fetched.IsUnknown() {
+		return planned, diags
 	}
 
 	plannedAttributes := planned.Attributes()
@@ -387,7 +398,7 @@ func modelMergeSettings(ctx context.Context, planned, fetched types.Object) (typ
 			merged[name] = mergedObject
 			continue
 		}
-		if plannedValue.IsNull() || plannedValue.IsUnknown() {
+		if plannedValue.IsUnknown() {
 			merged[name] = fetchedValue
 			continue
 		}

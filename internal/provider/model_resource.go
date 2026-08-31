@@ -958,6 +958,18 @@ func (r *modelResource) reconcileEnvironments(
 			return types.MapNull(environmentType), diags
 		}
 
+		// The read-only attributes follow the same rule as the settings below: the
+		// read fills them in for an environment the plan knew nothing about, and
+		// the plan's own value stands for one it did. An instance type that moved
+		// since the last refresh is drift, and reporting it here instead would
+		// fail the apply for disagreeing with the plan.
+		if !plannedEntry.CreatedAt.IsUnknown() {
+			fetchedEntry.CreatedAt = plannedEntry.CreatedAt
+		}
+		if !plannedEntry.InstanceTypeName.IsUnknown() {
+			fetchedEntry.InstanceTypeName = plannedEntry.InstanceTypeName
+		}
+
 		mergedAutoscaling, mergeDiags := modelMergeSettings(ctx, plannedEntry.Autoscaling, fetchedEntry.Autoscaling)
 		diags.Append(mergeDiags...)
 		mergedPromotion, mergeDiags := modelMergeSettings(ctx, plannedEntry.Promotion, fetchedEntry.Promotion)

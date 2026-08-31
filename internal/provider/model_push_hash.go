@@ -36,6 +36,14 @@ type modelPushPrivateState interface {
 // first time nothing else changed. The source_hash attribute is the baseline.
 const modelPushHashesKey = "push_source_hashes"
 
+// modelPushInlineConfigLabel stands in for an inline configuration in the hash
+// inventory. It is deliberately not config.yaml, the file the inline config is
+// written to, because the inventory is what change summaries are built from: a
+// file name there would report moving between config_dir and config as an edit
+// to that file, rather than as the swap of one whole source for another that it
+// is. The angle brackets keep it from colliding with a real archive path.
+const modelPushInlineConfigLabel = "<inline config>"
+
 // modelPushChangesReported caps how many paths a change summary names, so a
 // churning build directory cannot produce an unreadable wall of paths.
 const modelPushChangesReported = 3
@@ -87,7 +95,7 @@ func modelPushInlineHashes(config map[string]any) (modelPushHashes, error) {
 	}
 	sum := sha256.Sum256(canonical)
 	return modelPushHashes{
-		Files: map[string]string{modelPushConfigFileName: hex.EncodeToString(sum[:])},
+		Files: map[string]string{modelPushInlineConfigLabel: hex.EncodeToString(sum[:])},
 	}, nil
 }
 

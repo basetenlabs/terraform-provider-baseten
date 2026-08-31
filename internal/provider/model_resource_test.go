@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -107,7 +108,7 @@ func TestModelResourceCreateUpsertsEnvironments(t *testing.T) {
 	plan := tfsdk.Plan{Schema: modelSchema, Raw: testModelPlanValue(t, modelSchema, modelResourceModel{
 		Name:                          types.StringValue("whisper"),
 		EnvironmentDeletionProtection: types.BoolValue(true),
-		Environments: testModelEnvironments(t, map[string]modelEnvironmentModel{
+		Environments: testModelPlanEnvironments(t, map[string]modelEnvironmentModel{
 			"production": {
 				Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
 					MinReplica: types.Int64Value(3),
@@ -336,6 +337,99 @@ func TestModelResourceReconcileSkipsProductionDeletion(t *testing.T) {
 	}
 	if got := fake.requestsTo("DELETE", "/v1/models/model-1/environments/staging"); len(got) != 1 {
 		t.Errorf("got %d deletes of staging, want 1", len(got))
+	}
+}
+
+// TestModelResourceUpdateKeepsPlannedSettingsOverReadBack covers the rule
+// Terraform enforces on every apply: a value the plan settled is the value the
+// apply has to return. Baseten can disagree with the plan for two reasons,
+// settings that apply asynchronously and settings Baseten moves on its own, and
+// recording either would fail the apply with an inconsistent-result error naming
+// the provider. The next refresh reports it as drift instead.
+func TestModelResourceUpdateKeepsPlannedSettingsOverReadBack(t *testing.T) {
+	production := testAPIEnvironment(t, "production", 1)
+
+	// The read taken after the write disagrees with the plan about every kind of
+	// attribute: one the configuration set, one it left to the prior value, and a
+	// read-only one.
+	scaleDownDelay := 900
+	readBack := production
+	readBack.AutoscalingSettings.MinReplica = 1
+	readBack.AutoscalingSettings.MaxReplica = 9
+	readBack.AutoscalingSettings.ScaleDownDelay = &scaleDownDelay
+	readBack.InstanceType = managementapi.InstanceType{Id: "4x16", Name: "4x16"}
+
+	r, _, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models/model-1/environments": managementapi.Environments{
+			Environments: []managementapi.Environment{production},
+		},
+		"PATCH /v1/models/model-1/environments/production": managementapi.UpdateAutoscalingSettingsResponse{
+			Status: managementapi.UpdateAutoscalingSettingsStatus_ACCEPTED,
+		},
+		"GET /v1/models/model-1/environments/production": readBack,
+	})
+
+	settings := func(minReplica, maxReplica int64) modelEnvironmentModel {
+		return modelEnvironmentModel{
+			Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
+				MinReplica: types.Int64Value(minReplica),
+				MaxReplica: types.Int64Value(maxReplica),
+			}),
+			InstanceTypeName: types.StringValue("1x2"),
+		}
+	}
+	prior := modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		Environments: testModelEnvironments(t, map[string]modelEnvironmentModel{
+			"production": settings(1, 4),
+		}),
+	}
+	// min_replica is configured. max_replica, scale_down_delay, and
+	// instance_type_name are not, so Terraform plans the prior values, a null
+	// among them, and a null is just as settled as a number.
+	planned := prior
+	planned.Environments = testModelEnvironments(t, map[string]modelEnvironmentModel{
+		"production": settings(3, 4),
+	})
+
+	priorValue := testModelValue(t, modelSchema, prior)
+	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
+	r.Update(t.Context(), fwresource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+	}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	var got modelResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	entries, diags := modelEnvironmentEntries(t.Context(), got.Environments)
+	if diags.HasError() {
+		t.Fatalf("reading environments from state: %v", diags)
+	}
+	autoscaling := testModelAutoscalingOf(t, entries["production"])
+	if autoscaling.MinReplica.ValueInt64() != 3 {
+		t.Errorf("got min_replica %v, want the configured 3 despite the read reporting 1",
+			autoscaling.MinReplica)
+	}
+	if autoscaling.MaxReplica.ValueInt64() != 4 {
+		t.Errorf("got max_replica %v, want the planned 4 despite the read reporting 9",
+			autoscaling.MaxReplica)
+	}
+	if !autoscaling.ScaleDownDelay.IsNull() {
+		t.Errorf("got scale_down_delay %v, want the planned null despite the read reporting 900",
+			autoscaling.ScaleDownDelay)
+	}
+	if entries["production"].InstanceTypeName.ValueString() != "1x2" {
+		t.Errorf("got instance_type_name %q, want the planned %q despite the read reporting %q",
+			entries["production"].InstanceTypeName.ValueString(), "1x2", "4x16")
 	}
 }
 
@@ -631,6 +725,458 @@ func TestModelResourceModifyPlanWarnings(t *testing.T) {
 	}
 }
 
+// TestModelResourceCreateTakesOverExistingModel covers managed mode meeting a
+// model that already exists: it is taken over at whatever is deployed, and the
+// local hash is recorded as the starting point rather than pushed.
+//
+// It is also how a create whose push failed recovers. Terraform records nothing
+// for a failed create, so the model that push created is untracked, and the next
+// apply comes back through here and adopts it instead of pushing it again.
+// Recording state on a failed create would be worse: Terraform taints a resource
+// whose create errored and replaces it on the next apply, so a create that only
+// timed out waiting would come back as a destroy, and with deletion_protection
+// off that destroy deletes the model.
+func TestModelResourceCreateTakesOverExistingModel(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+
+	r, fake, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models": managementapi.Models{Models: []managementapi.Model{{
+			Id: "model-1", Name: "whisper", TeamName: "Default Team", CreatedAt: testTimestamp(t),
+		}}},
+		"GET /v1/models/model-1/environments": managementapi.Environments{},
+	})
+
+	plan := tfsdk.Plan{Schema: modelSchema, Raw: testModelPlanValue(t, modelSchema, modelResourceModel{
+		Name:                          types.StringValue("whisper"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(dir),
+			SourceHash: types.StringValue("hash-local"),
+		}),
+	})}
+
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	if pushes := fake.requestsTo("POST", "/v1/prepare_model_upload"); len(pushes) != 0 {
+		t.Errorf("got %d pushes, want none: the model already existed", len(pushes))
+	}
+
+	var got modelResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	if got.ID.ValueString() != "model-1" {
+		t.Errorf("got id %q, want the existing %q", got.ID.ValueString(), "model-1")
+	}
+	// Nothing was pushed, so no deployment is Terraform's.
+	if !got.DeploymentID.IsNull() {
+		t.Errorf("got deployment_id %v, want null", got.DeploymentID)
+	}
+	gotPush, _, diags := modelPushEntry(t.Context(), got.Push)
+	if diags.HasError() {
+		t.Fatalf("reading push from state: %v", diags)
+	}
+	if gotPush.SourceHash.ValueString() != "hash-local" {
+		t.Errorf("got source_hash %q, want the local %q recorded as the baseline",
+			gotPush.SourceHash.ValueString(), "hash-local")
+	}
+}
+
+// TestModelResourceCreatePushesNewModel covers the only path that creates a
+// model, since Baseten has no way to create one without deploying something.
+func TestModelResourceCreatePushesNewModel(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+
+	r, fake, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models":                managementapi.Models{},
+		"POST /v1/prepare_model_upload": managementapi.PrepareModelUploadResponse{},
+		"POST /v1/models": managementapi.CreatedModelDeployment{
+			Model: managementapi.Model{
+				Id: "model-1", Name: "whisper", TeamName: "Default Team", CreatedAt: testTimestamp(t),
+			},
+			Deployment: managementapi.Deployment{
+				Id: "deployment-1", ModelId: "model-1", CreatedAt: testTimestamp(t),
+				Status: managementapi.DeploymentStatus_BUILDING,
+			},
+		},
+		"GET /v1/models/model-1/environments": managementapi.Environments{},
+	})
+
+	plan := tfsdk.Plan{Schema: modelSchema, Raw: testModelPlanValue(t, modelSchema, modelResourceModel{
+		Name:                          types.StringValue("whisper"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(dir),
+			SourceHash: types.StringValue("hash-local"),
+		}),
+	})}
+
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	if creates := fake.requestsTo("POST", "/v1/models"); len(creates) != 1 {
+		t.Fatalf("got %d model creates, want 1", len(creates))
+	}
+
+	var got modelResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	if got.ID.ValueString() != "model-1" {
+		t.Errorf("got id %q, want %q", got.ID.ValueString(), "model-1")
+	}
+	if got.DeploymentID.ValueString() != "deployment-1" {
+		t.Errorf("got deployment_id %q, want the pushed %q", got.DeploymentID.ValueString(), "deployment-1")
+	}
+}
+
+// TestModelResourceUpdateAddingPushAdoptsSource covers adopted becoming managed.
+// There is no baseline to compare against, so the local hash becomes the
+// baseline and nothing is pushed: what is deployed keeps serving, and the first
+// edit after this pushes.
+func TestModelResourceUpdateAddingPushAdoptsSource(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+
+	r, fake, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models/model-1/environments": managementapi.Environments{},
+	})
+
+	prior := modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+	}
+	planned := prior
+	planned.Push = testModelPushObject(t, modelPushModel{
+		ConfigDir:  types.StringValue(dir),
+		SourceHash: types.StringValue("hash-local"),
+	})
+
+	priorValue := testModelValue(t, modelSchema, prior)
+	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
+	r.Update(t.Context(), fwresource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+	}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	if pushes := fake.requestsTo("POST", "/v1/prepare_model_upload"); len(pushes) != 0 {
+		t.Errorf("got %d pushes, want none: adding push takes the source over", len(pushes))
+	}
+
+	var got modelResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	gotPush, hasPush, diags := modelPushEntry(t.Context(), got.Push)
+	if diags.HasError() {
+		t.Fatalf("reading push from state: %v", diags)
+	}
+	if !hasPush {
+		t.Fatal("got no push in state, want the one just added")
+	}
+	if gotPush.SourceHash.ValueString() != "hash-local" {
+		t.Errorf("got source_hash %q, want the local %q as the new baseline",
+			gotPush.SourceHash.ValueString(), "hash-local")
+	}
+	if !got.DeploymentID.IsNull() {
+		t.Errorf("got deployment_id %v, want null: nothing was pushed", got.DeploymentID)
+	}
+}
+
+// TestModelResourceUpdateEnvironmentFailurePushesNothing covers the ordering
+// promise. Environment settings are written before a push so a new deployment
+// rolls out under the settings the apply asked for, which means a settings
+// failure has to stop the push too, and record nothing.
+func TestModelResourceUpdateEnvironmentFailurePushesNothing(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+	production := testAPIEnvironment(t, "production", 1)
+
+	// The PATCH route is absent, so writing the settings fails.
+	r, fake, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models/model-1/environments": managementapi.Environments{
+			Environments: []managementapi.Environment{production},
+		},
+	})
+
+	prior := modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(dir),
+			SourceHash: types.StringValue("hash-pushed"),
+		}),
+		Environments: testModelEnvironments(t, map[string]modelEnvironmentModel{
+			"production": {
+				Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
+					MinReplica: types.Int64Value(1),
+				}),
+			},
+		}),
+	}
+	planned := prior
+	planned.DeploymentID = types.StringUnknown()
+	planned.Push = testModelPushObject(t, modelPushModel{
+		ConfigDir:  types.StringValue(dir),
+		SourceHash: types.StringValue("hash-edited"),
+	})
+	planned.Environments = testModelEnvironments(t, map[string]modelEnvironmentModel{
+		"production": {
+			Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
+				MinReplica: types.Int64Value(3),
+			}),
+		},
+	})
+
+	priorValue := testModelValue(t, modelSchema, prior)
+	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
+	r.Update(t.Context(), fwresource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+	}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("got no error for a settings write that failed, want one")
+	}
+	if pushes := fake.requestsTo("POST", "/v1/prepare_model_upload"); len(pushes) != 0 {
+		t.Errorf("got %d pushes, want none: the settings the deployment would roll out under never landed",
+			len(pushes))
+	}
+
+	var got modelResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	gotPush, _, diags := modelPushEntry(t.Context(), got.Push)
+	if diags.HasError() {
+		t.Fatalf("reading push from state: %v", diags)
+	}
+	if gotPush.SourceHash.ValueString() != "hash-pushed" {
+		t.Errorf("got source_hash %q, want the untouched %q", gotPush.SourceHash.ValueString(), "hash-pushed")
+	}
+	entries, diags := modelEnvironmentEntries(t.Context(), got.Environments)
+	if diags.HasError() {
+		t.Fatalf("reading environments from state: %v", diags)
+	}
+	if got := testModelAutoscalingOf(t, entries["production"]).MinReplica.ValueInt64(); got != 1 {
+		t.Errorf("got production min_replica %d, want the untouched 1", got)
+	}
+}
+
+// TestModelResourceModifyPlanConfiguredSourceHash covers taking the hash over by
+// hand, which is how a source Terraform cannot see gets pushed on demand. The
+// configured value is used verbatim and the source is never read, proven here by
+// a config_dir that does not exist.
+func TestModelResourceModifyPlanConfiguredSourceHash(t *testing.T) {
+	r, _, modelSchema := testModelResource(t, nil)
+
+	configured := modelResourceModel{
+		Name:                          types.StringValue("whisper"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(filepath.Join(t.TempDir(), "does-not-exist")),
+			SourceHash: types.StringValue("pinned-2"),
+		}),
+	}
+	configuredValue := testModelValue(t, modelSchema, configured)
+
+	state := tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		DeploymentID:                  types.StringValue("deployment-1"),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(filepath.Join(t.TempDir(), "does-not-exist")),
+			SourceHash: types.StringValue("pinned-1"),
+		}),
+	})}
+
+	resp := &fwresource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: modelSchema, Raw: configuredValue}}
+	r.ModifyPlan(t.Context(), fwresource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: modelSchema, Raw: configuredValue},
+		Plan:   tfsdk.Plan{Schema: modelSchema, Raw: configuredValue},
+		State:  state,
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got errors %v, want none: the source must not be read", resp.Diagnostics)
+	}
+	if got := testDiagnosticsText(resp.Diagnostics.Warnings()); !strings.Contains(got, "will be pushed") {
+		t.Errorf("got warnings %q, want one announcing the push", got)
+	}
+
+	var planned modelResourceModel
+	if diags := resp.Plan.Get(t.Context(), &planned); diags.HasError() {
+		t.Fatalf("reading resulting plan: %v", diags)
+	}
+	plannedPush, _, diags := modelPushEntry(t.Context(), planned.Push)
+	if diags.HasError() {
+		t.Fatalf("reading push from the plan: %v", diags)
+	}
+	if plannedPush.SourceHash.ValueString() != "pinned-2" {
+		t.Errorf("got planned source_hash %q, want the configured %q verbatim",
+			plannedPush.SourceHash.ValueString(), "pinned-2")
+	}
+	// The push replaces what is deployed, so the plan cannot promise the old one.
+	if !planned.DeploymentID.IsUnknown() {
+		t.Errorf("got planned deployment_id %v, want unknown", planned.DeploymentID)
+	}
+}
+
+// TestModelResourceDeleteManaged covers destroy in managed mode, where the model
+// is Terraform's to delete and deletion_protection is the only thing standing in
+// front of every deployment under it.
+func TestModelResourceDeleteManaged(t *testing.T) {
+	tests := []struct {
+		name       string
+		protection bool
+		wantDelete int
+	}{
+		{name: "ProtectedKeepsModel", protection: true},
+		{name: "UnprotectedDeletesModel", protection: false, wantDelete: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r, fake, modelSchema := testModelResource(t, map[string]any{
+				"DELETE /v1/models/model-1": map[string]any{},
+			})
+
+			state := tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+				ID:                            types.StringValue("model-1"),
+				Name:                          types.StringValue("whisper"),
+				CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+				DeletionProtection:            types.BoolValue(test.protection),
+				EnvironmentDeletionProtection: types.BoolValue(true),
+				Push: testModelPushObject(t, modelPushModel{
+					ConfigDir:  types.StringValue("./whisper"),
+					SourceHash: types.StringValue("hash-pushed"),
+				}),
+			})}
+
+			resp := &fwresource.DeleteResponse{State: state}
+			r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+			}
+
+			if got := fake.requestsTo("DELETE", "/v1/models/model-1"); len(got) != test.wantDelete {
+				t.Errorf("got %d model deletes, want %d", len(got), test.wantDelete)
+			}
+		})
+	}
+}
+
+// TestModelResourceDeleteAdopted covers destroy in adopted mode, which never
+// deletes the model it did not create. Environments are the exception, since
+// Terraform did create those, and only where they are unprotected.
+func TestModelResourceDeleteAdopted(t *testing.T) {
+	r, fake, modelSchema := testModelResource(t, map[string]any{
+		"DELETE /v1/models/model-1/environments/staging": map[string]any{},
+	})
+
+	state := tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(false),
+		EnvironmentDeletionProtection: types.BoolValue(false),
+		Environments: testModelEnvironments(t, map[string]modelEnvironmentModel{
+			"production": {},
+			"staging":    {},
+		}),
+	})}
+
+	resp := &fwresource.DeleteResponse{State: state}
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	// deletion_protection is false, and it still must not delete a model this
+	// configuration only adopted.
+	if got := fake.requestsTo("DELETE", "/v1/models/model-1"); len(got) != 0 {
+		t.Errorf("got %d model deletes, want none in adopted mode", len(got))
+	}
+	if got := fake.requestsTo("DELETE", "/v1/models/model-1/environments/staging"); len(got) != 1 {
+		t.Errorf("got %d staging deletes, want 1", len(got))
+	}
+	if got := fake.requestsTo("DELETE", "/v1/models/model-1/environments/production"); len(got) != 0 {
+		t.Errorf("got %d production deletes, want none: Baseten rejects them", len(got))
+	}
+	if got := testDiagnosticsText(resp.Diagnostics.Warnings()); !strings.Contains(got, "Production") {
+		t.Errorf("got warnings %q, want one saying production was left alone", got)
+	}
+}
+
+// TestModelResourceDeleteToleratesMissingModel covers a destroy racing anything
+// that already deleted the model. The end state is the one asked for, so it is
+// not an error.
+func TestModelResourceDeleteToleratesMissingModel(t *testing.T) {
+	r, _, modelSchema := testModelResource(t, nil)
+
+	state := tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(false),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue("./whisper"),
+			SourceHash: types.StringValue("hash-pushed"),
+		}),
+	})}
+
+	resp := &fwresource.DeleteResponse{State: state}
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none for a model that is already gone", resp.Diagnostics)
+	}
+}
+
+// TestModelResourceReadForgetsDeletedModel covers a refresh finding the model
+// gone. Removing it from state has the next plan offer to create it, which is
+// the only useful answer.
+func TestModelResourceReadForgetsDeletedModel(t *testing.T) {
+	r, _, modelSchema := testModelResource(t, nil)
+
+	state := tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+	})}
+
+	resp := &fwresource.ReadResponse{State: state}
+	r.Read(t.Context(), fwresource.ReadRequest{State: state}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("got state %v, want it removed", resp.State.Raw)
+	}
+}
+
 func testModelResource(t *testing.T, responses map[string]any) (*modelResource, *fakeAPI, schema.Schema) {
 	t.Helper()
 
@@ -693,6 +1239,57 @@ func testModelPlanValue(t *testing.T, modelSchema schema.Schema, model modelReso
 		}
 	}
 	return testModelValue(t, modelSchema, model)
+}
+
+// testModelPlanEnvironments renders the environments map the way Terraform plans
+// one, where every attribute the configuration leaves out arrives unknown rather
+// than null. The difference is the whole contract: unknown is Terraform asking
+// the apply to fill a value in, and null is a value the plan settled and the
+// apply has to return unchanged. Passing nulls instead would let a provider that
+// overwrites settled values with whatever Baseten reports pass its tests, and
+// then fail a real apply with an inconsistent-result error.
+func testModelPlanEnvironments(t *testing.T, entries map[string]modelEnvironmentModel) types.Map {
+	t.Helper()
+
+	planned := make(map[string]attr.Value, len(entries))
+	for name, element := range testModelEnvironments(t, entries).Elements() {
+		planned[name] = testModelPlannedValue(t, element)
+	}
+	environments, diags := types.MapValue(modelEnvironmentObjectType(), planned)
+	if diags.HasError() {
+		t.Fatalf("building planned environments map: %v", diags)
+	}
+	return environments
+}
+
+// testModelPlannedValue makes every null in a value unknown, recursively, since
+// a create plans an Optional+Computed attribute it has no configuration or prior
+// state for as unknown.
+func testModelPlannedValue(t *testing.T, value attr.Value) attr.Value {
+	t.Helper()
+
+	if object, isObject := value.(types.Object); isObject && !object.IsNull() && !object.IsUnknown() {
+		attributes := make(map[string]attr.Value, len(object.Attributes()))
+		for name, attribute := range object.Attributes() {
+			attributes[name] = testModelPlannedValue(t, attribute)
+		}
+		planned, diags := types.ObjectValue(object.AttributeTypes(t.Context()), attributes)
+		if diags.HasError() {
+			t.Fatalf("building planned object: %v", diags)
+		}
+		return planned
+	}
+	if !value.IsNull() {
+		return value
+	}
+
+	valueType := value.Type(t.Context())
+	unknown, err := valueType.ValueFromTerraform(t.Context(),
+		tftypes.NewValue(valueType.TerraformType(t.Context()), tftypes.UnknownValue))
+	if err != nil {
+		t.Fatalf("building an unknown %s: %v", valueType, err)
+	}
+	return unknown
 }
 
 func testModelEnvironments(t *testing.T, entries map[string]modelEnvironmentModel) types.Map {
