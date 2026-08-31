@@ -339,6 +339,239 @@ func TestModelResourceReconcileSkipsProductionDeletion(t *testing.T) {
 	}
 }
 
+// TestModelResourceUpdateFailedPushKeepsSourceHash covers a push that fails not
+// being recorded as one that happened. The source hash is the only thing that
+// decides whether the next plan pushes, and no refresh can recover it, so state
+// has to keep the hash of the source that was last pushed. The environment
+// writes that did land are recorded, since those already exist at Baseten.
+func TestModelResourceUpdateFailedPushKeepsSourceHash(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+	production := testAPIEnvironment(t, "production", 1)
+
+	// The push routes are absent, so the push fails after the environment writes.
+	r, _, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models/model-1/environments": managementapi.Environments{
+			Environments: []managementapi.Environment{production},
+		},
+		"PATCH /v1/models/model-1/environments/production": managementapi.UpdateAutoscalingSettingsResponse{
+			Status: managementapi.UpdateAutoscalingSettingsStatus_ACCEPTED,
+		},
+		"GET /v1/models/model-1/environments/production": production,
+	})
+
+	prior := modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		DeploymentID:                  types.StringValue("deployment-1"),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(dir),
+			SourceHash: types.StringValue("hash-pushed"),
+		}),
+		Environments: testModelEnvironments(t, map[string]modelEnvironmentModel{
+			"production": {
+				Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
+					MinReplica: types.Int64Value(1),
+				}),
+			},
+		}),
+	}
+	// The plan carries the edited source's hash and, because it plans to push,
+	// an unknown deployment_id, which is what ModifyPlan settles.
+	planned := prior
+	planned.DeploymentID = types.StringUnknown()
+	planned.Push = testModelPushObject(t, modelPushModel{
+		ConfigDir:  types.StringValue(dir),
+		SourceHash: types.StringValue("hash-edited"),
+	})
+	planned.Environments = testModelEnvironments(t, map[string]modelEnvironmentModel{
+		"production": {
+			Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
+				MinReplica: types.Int64Value(3),
+			}),
+		},
+	})
+
+	priorValue := testModelValue(t, modelSchema, prior)
+	state := tfsdk.State{Schema: modelSchema, Raw: priorValue}
+	// The framework seeds the response with prior state, so a provider that
+	// returns early records nothing.
+	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
+	r.Update(t.Context(), fwresource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State: state,
+	}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("got no error for a push that could not reach Baseten, want one")
+	}
+
+	var got modelResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	gotPush, hasPush, diags := modelPushEntry(t.Context(), got.Push)
+	if diags.HasError() {
+		t.Fatalf("reading push from state: %v", diags)
+	}
+	if !hasPush {
+		t.Fatal("got no push in state, want the prior one")
+	}
+	if gotPush.SourceHash.ValueString() != "hash-pushed" {
+		t.Errorf("got source_hash %q, want the last pushed %q: the next plan would read the source as "+
+			"unchanged and never retry the push", gotPush.SourceHash.ValueString(), "hash-pushed")
+	}
+	// The deployment already serving is untouched, so state still names it.
+	if got.DeploymentID.ValueString() != "deployment-1" {
+		t.Errorf("got deployment_id %q, want the prior %q", got.DeploymentID.ValueString(), "deployment-1")
+	}
+
+	entries, diags := modelEnvironmentEntries(t.Context(), got.Environments)
+	if diags.HasError() {
+		t.Fatalf("reading environments from state: %v", diags)
+	}
+	if got := testModelAutoscalingOf(t, entries["production"]).MinReplica.ValueInt64(); got != 3 {
+		t.Errorf("got production min_replica %d, want the written 3: the environment write landed", got)
+	}
+}
+
+// TestModelResourceUpdateDeployedPushRecordsFailedWait is the other half: a push
+// Baseten accepted and then failed to bring up did happen, so state records it
+// even though the apply errors. Reverting the hash here would have the next apply
+// push the same source again, alongside the deployment this one created.
+func TestModelResourceUpdateDeployedPushRecordsFailedWait(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+	model := managementapi.Model{
+		Id: "model-1", Name: "whisper", TeamName: "Default Team", CreatedAt: testTimestamp(t),
+	}
+	// The push reaches Baseten and the deployment it creates never becomes
+	// active, which fails the wait without un-pushing anything.
+	failed := managementapi.Deployment{
+		Id:        "deployment-2",
+		ModelId:   "model-1",
+		Status:    managementapi.DeploymentStatus_BUILD_FAILED,
+		CreatedAt: testTimestamp(t),
+	}
+
+	r, _, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models/model-1/environments": managementapi.Environments{},
+		// A prepare that issues no upload target is how a format built from the
+		// config alone pushes, which is what makes a push fakeable here.
+		"POST /v1/prepare_model_upload": managementapi.PrepareModelUploadResponse{},
+		"POST /v1/models/model-1/deployments": managementapi.CreatedModelDeployment{
+			Model: model, Deployment: failed,
+		},
+		"GET /v1/models/model-1/deployments/deployment-2": failed,
+	})
+
+	prior := modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		DeploymentID:                  types.StringValue("deployment-1"),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(dir),
+			SourceHash: types.StringValue("hash-pushed"),
+			Wait:       types.BoolValue(true),
+		}),
+	}
+	planned := prior
+	planned.DeploymentID = types.StringUnknown()
+	planned.Push = testModelPushObject(t, modelPushModel{
+		ConfigDir:  types.StringValue(dir),
+		SourceHash: types.StringValue("hash-edited"),
+		Wait:       types.BoolValue(true),
+	})
+
+	priorValue := testModelValue(t, modelSchema, prior)
+	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
+	r.Update(t.Context(), fwresource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+	}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("got no error for a deployment that did not become active, want one")
+	}
+
+	var got modelResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	gotPush, _, diags := modelPushEntry(t.Context(), got.Push)
+	if diags.HasError() {
+		t.Fatalf("reading push from state: %v", diags)
+	}
+	if gotPush.SourceHash.ValueString() != "hash-edited" {
+		t.Errorf("got source_hash %q, want the pushed %q: the source was deployed, so pushing it again "+
+			"would deploy a duplicate", gotPush.SourceHash.ValueString(), "hash-edited")
+	}
+	if got.DeploymentID.ValueString() != "deployment-2" {
+		t.Errorf("got deployment_id %q, want the created %q", got.DeploymentID.ValueString(), "deployment-2")
+	}
+}
+
+// TestModelResourceModifyPlanRemovingPushNullsDeploymentID covers the plan
+// promising what the apply does. deployment_id is Computed, so Terraform carries
+// the prior value into the plan, and an apply that nulls it without the plan
+// saying so fails with an inconsistent result.
+func TestModelResourceModifyPlanRemovingPushNullsDeploymentID(t *testing.T) {
+	dir := testModelDir(t, map[string]string{"config.yaml": "model_name: whisper\n"})
+
+	r, _, modelSchema := testModelResource(t, nil)
+
+	state := tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		DeploymentID:                  types.StringValue("deployment-1"),
+		Push: testModelPushObject(t, modelPushModel{
+			ConfigDir:  types.StringValue(dir),
+			SourceHash: types.StringValue("hash-pushed"),
+		}),
+	})}
+
+	// The configuration dropped push. Everything else, including deployment_id,
+	// comes through the plan as prior state had it.
+	config := tfsdk.Config{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+		Name:                          types.StringValue("whisper"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+	})}
+	plan := tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, modelResourceModel{
+		ID:                            types.StringValue("model-1"),
+		Name:                          types.StringValue("whisper"),
+		CreatedAt:                     types.StringValue("2026-08-19T12:00:00Z"),
+		DeletionProtection:            types.BoolValue(true),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		DeploymentID:                  types.StringValue("deployment-1"),
+	})}
+
+	resp := &fwresource.ModifyPlanResponse{Plan: plan}
+	r.ModifyPlan(t.Context(), fwresource.ModifyPlanRequest{Config: config, Plan: plan, State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got errors %v, want warnings only", resp.Diagnostics)
+	}
+	if got := testDiagnosticsText(resp.Diagnostics.Warnings()); !strings.Contains(got, "no longer Terraform-managed") {
+		t.Errorf("got warnings %q, want one saying the model is no longer managed", got)
+	}
+
+	var planned modelResourceModel
+	if diags := resp.Plan.Get(t.Context(), &planned); diags.HasError() {
+		t.Fatalf("reading resulting plan: %v", diags)
+	}
+	if !planned.DeploymentID.IsNull() {
+		t.Errorf("got planned deployment_id %v, want null to match what the apply writes", planned.DeploymentID)
+	}
+}
+
 func TestModelResourceModifyPlanWarnings(t *testing.T) {
 	r, _, modelSchema := testModelResource(t, nil)
 

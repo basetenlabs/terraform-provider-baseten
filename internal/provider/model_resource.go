@@ -360,6 +360,10 @@ func (r *modelResource) modifyPushPlan(ctx context.Context, req resource.ModifyP
 				"the recorded hash. Nothing is pushed and nothing is deleted, and the deployment already "+
 				"running is left alone.",
 		)
+		// deployment_id is Computed, so Terraform carries the prior value into the
+		// plan, but adopted mode reports no deployment and the apply nulls it. The
+		// plan has to say so, or the apply returns a value the plan did not promise.
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("deployment_id"), types.StringNull())...)
 	}
 	if !hasPush {
 		return
@@ -641,59 +645,85 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	plan.Environments = environments
 
-	resp.Diagnostics.Append(r.updatePush(ctx, &plan, state)...)
-	if resp.Diagnostics.HasError() {
-		// The environment writes above already landed, so state has to record
-		// them even though the push failed.
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	pushed, pushDiags := r.updatePush(ctx, &plan, state)
+	resp.Diagnostics.Append(pushDiags...)
+	if resp.Diagnostics.HasError() && !pushed {
+		// A push that never reached Baseten records prior state plus the
+		// environment writes that did land, rather than the plan. Recording the
+		// plan would store the source hash of a push that never happened, and the
+		// next plan would read the source as unchanged and never retry it. Nothing
+		// else can recover from that, since Baseten does not report what a
+		// deployment was built from, whereas an environment setting is re-read on
+		// every refresh.
+		resp.State = req.State
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("environments"), environments)...)
+		// ModifyPlan recorded the new inventory in private state. Drop it, so the
+		// retry describes its changes against the source that was last pushed
+		// rather than against one that never was. An empty value removes the key.
+		_ = resp.Private.SetKey(ctx, modelPushHashesKey, nil)
 		return
 	}
 
+	// Either the update succeeded, or the deployment was created and only failed
+	// to come up. Both leave the pushed source deployed, so state records it and
+	// the next apply does not push it again.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // updatePush pushes when something that deploys changed, which is the source's
 // identity or the explicit triggers. Everything else in `push` is an argument the
 // next push will use, so it lands in state and does nothing else.
-func (r *modelResource) updatePush(ctx context.Context, plan *modelResourceModel, state modelResourceModel) diag.Diagnostics {
+//
+// The reported bool is whether a deployment was created, which decides what a
+// failed update records. It is not the same as succeeding: a push that Baseten
+// accepted and then failed to bring up reports true along with the error.
+func (r *modelResource) updatePush(
+	ctx context.Context,
+	plan *modelResourceModel,
+	state modelResourceModel,
+) (bool, diag.Diagnostics) {
 	push, hasPush, diags := modelPushEntry(ctx, plan.Push)
 	if diags.HasError() {
-		return diags
+		return false, diags
 	}
 	statePush, hadPush, stateDiags := modelPushEntry(ctx, state.Push)
 	diags.Append(stateDiags...)
 	if diags.HasError() {
-		return diags
+		return false, diags
 	}
 
 	// Removing push stops managing the artifact. It is not a delete and not a
 	// final push, so the deployment already running is left alone.
 	if !hasPush {
 		plan.DeploymentID = types.StringNull()
-		return diags
+		return false, diags
 	}
 	push, settleDiags := r.settlePushSourceHash(ctx, plan, push)
 	diags.Append(settleDiags...)
 	if diags.HasError() {
-		return diags
+		return false, diags
 	}
 
 	// No prior hash means the model is being taken over, so record what the plan
 	// computed and leave whatever is deployed serving.
 	if !hadPush || !modelIsSet(statePush.SourceHash) {
-		return diags
+		return false, diags
 	}
 	if !modelPushDeploys(push, statePush) {
-		return diags
+		return false, diags
 	}
 
 	result, pushDiags := r.pushModel(ctx, push, state.ID.ValueString(), "", state.Name.ValueString())
 	diags.Append(pushDiags...)
-	if diags.HasError() {
-		return diags
+	// A result means Baseten created the deployment. Waiting for it to settle can
+	// still fail, by timing out or by the deployment failing to build, and neither
+	// un-pushes it: the deployment exists, and reporting otherwise would have the
+	// next apply push the same source again alongside it.
+	if result == nil {
+		return false, diags
 	}
 	plan.DeploymentID = types.StringValue(result.Deployment.Id)
-	return diags
+	return true, diags
 }
 
 // Delete forgets the model, which this resource never created. Environments are

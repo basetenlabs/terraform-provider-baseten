@@ -322,6 +322,41 @@ resource "baseten_model" "test" {
 					deploymentReplaced.AddStateValue("baseten_model.test", tfjsonpath.New("deployment_id")),
 				},
 			},
+
+			// Managed back to adopted on the same resource, which no unit test can
+			// prove: Terraform itself rejects an apply that returns a value the
+			// plan did not promise, and deployment_id is Computed, so the prior
+			// value rides into the plan unless the plan nulls it. Pushing nothing
+			// makes this the cheapest step here.
+			{
+				Config: fmt.Sprintf(`
+resource "baseten_model" "test" {
+  name = %[1]q
+
+  environments = {
+    production = {
+      autoscaling = {
+        min_replica      = 0
+        max_replica      = 2
+        scale_down_delay = 900
+      }
+    }
+  }
+}
+`, modelName),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("baseten_model.test",
+						tfjsonpath.New("push"), knownvalue.Null()),
+					statecheck.ExpectKnownValue("baseten_model.test",
+						tfjsonpath.New("deployment_id"), knownvalue.Null()),
+					// The model is adopted, not gone: it keeps its identity and the
+					// environment it was managing.
+					statecheck.ExpectKnownValue("baseten_model.test",
+						tfjsonpath.New("id"), knownvalue.NotNull()),
+					statecheck.ExpectKnownValue("baseten_model.test",
+						tfjsonpath.New("environments"), knownvalue.MapSizeExact(1)),
+				},
+			},
 		},
 	})
 }
