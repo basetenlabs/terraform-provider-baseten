@@ -1,0 +1,170 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+{{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{ .Description | trimspace }}
+
+## Example Usage
+
+### Adopted, managing environments only
+
+{{ tffile "examples/resources/baseten_model/resource-adopted.tf" }}
+
+### Managed, from a model directory
+
+{{ tffile "examples/resources/baseten_model/resource-managed-dir.tf" }}
+
+`phi-3-mini/` is an ordinary model directory:
+
+```text
+phi-3-mini/
+  config.yaml
+  model/
+    model.py
+```
+
+```yaml
+# config.yaml. model_name has to match the resource's name.
+model_name: Phi 3 Mini
+python_version: py311
+requirements:
+  - transformers==4.41.2
+  - torch==2.3.0
+  - accelerate==0.30.1
+resources:
+  instance_type: T4x4x16
+```
+
+### Managed, from an inline configuration
+
+Models built from configuration alone need no directory. Inline `config` cannot
+carry model code, and comments in it are not preserved.
+
+{{ tffile "examples/resources/baseten_model/resource-managed-inline.tf" }}
+
+## What causes a push
+
+Managed mode only. An adopted model has no `push` block, so Terraform never
+deploys to it and nothing in this section applies.
+
+A push happens when the source changes, or when a `triggers` entry changes.
+Nothing else in `push` deploys anything.
+
+```terraform
+push = {
+  # Pushes. source_hash is computed from the files this uploads, so editing
+  # model/model.py deploys on the next apply.
+  config_dir = "${path.module}/phi-3-mini"
+
+  # Pushes. Redeploys identical code, for a base image that moved or a secret
+  # that rotated. Keys are yours to choose, so record why.
+  triggers = {
+    hf_token_rotated = "2026-08-01"
+  }
+
+  # None of these push. They apply to the next push, the way a flag applies to
+  # the push you are running rather than to the deployment already serving.
+  environment            = "staging"
+  deployment_name        = "release-2026-08-01"
+  labels                 = { team = "search" }
+  wait                   = true
+  deploy_timeout_minutes = 45
+}
+```
+
+The plan says which of the two happened and names the files that changed. It
+also warns when one of the deferred attributes changed with no push to carry it.
+
+Hashing reads every uploaded file on every plan. On a directory big enough for
+that to hurt, set `source_hash` yourself and the directory is not read:
+
+```terraform
+push = {
+  config_dir  = "${path.module}/phi-3-mini"
+  source_hash = var.git_commit_sha
+}
+```
+
+Any value that changes when the source does will do. This replaces how the
+source is identified rather than forcing a push, so removing it later resumes
+hashing and pushes once. Use `triggers` to force a push.
+
+## Environments
+
+`environments` is exhaustive over what Terraform manages, not over what exists.
+
+```terraform
+environments = {
+  # Created if it does not exist. production is the exception: Baseten creates
+  # it with the model, and it cannot be created or deleted.
+  staging = {
+    autoscaling = { min_replica = 0, max_replica = 2 }
+  }
+}
+```
+
+- An environment the configuration never names is left alone, so one created in
+  the dashboard survives. Dropping `production` therefore stops managing it
+  rather than deleting it, which Baseten does not allow.
+- Settings left out of an entry keep their current value. Baseten has no way to
+  reset a setting to its default, so deleting a line does nothing and the plan
+  warns when a value in state stops being configured.
+- Settings are written before the push in the same apply, so a rollout uses the
+  settings that apply asked for. The apply that creates the model is inverted,
+  since the model has to exist first, so a new model's first deployment always
+  rolls out on Baseten's defaults.
+
+## Waiting and timeouts
+
+```terraform
+resource "baseten_model" "phi_3_mini" {
+  push = {
+    config_dir = "${path.module}/phi-3-mini"
+
+    # Block until the deployment is active, failing the apply if it is not.
+    wait = true
+
+    # How long Baseten allows the deploy itself to take.
+    deploy_timeout_minutes = 45
+  }
+
+  # How long Terraform waits. Defaults to 30 minutes.
+  timeouts {
+    create = "45m"
+    update = "45m"
+  }
+}
+```
+
+Without `wait`, an apply returns as soon as the deployment is created, so a
+build that fails later surfaces as drift on a later plan instead of as an apply
+error. A `timeouts` expiry stops the wait, not the deploy. Baseten keeps going
+and the next plan reads the result.
+
+## Destroying
+
+Two flags guard this, both defaulting to true.
+
+```terraform
+resource "baseten_model" "phi_3_mini" {
+  # Lets a destroy delete the model, and every deployment and environment under
+  # it. Does nothing in adopted mode, where a destroy only forgets the model.
+  deletion_protection = false
+
+  # Lets an entry be removed from environments, and lets a destroy delete
+  # managed environments when the model itself is not being deleted.
+  environment_deletion_protection = false
+}
+```
+
+Removing an environment entry works in the same apply that sets the flag.
+Destroying does not, because `terraform destroy` reads the flag out of state, so
+apply it first. To stop managing something without deleting it, use
+`terraform state rm`.
+
+{{ .SchemaMarkdown | trimspace }}

@@ -1,0 +1,24 @@
+---
+page_title: "Provider: Baseten"
+description: |-
+{{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# Baseten Provider
+
+{{ .Description | trimspace }}
+
+## Example Usage
+
+{{ tffile "examples/provider/provider.tf" }}
+
+## Where to start
+
+- [Getting started](guides/getting-started) configures the provider and shows
+  both modes of `baseten_model`.
+- [Adopted models](guides/adopted-models) manages the environments of a model
+  that already exists.
+- [Managed models](guides/managed-models) gives Terraform ownership of the
+  model's source and lifetime.
+
+{{ .SchemaMarkdown | trimspace }}
