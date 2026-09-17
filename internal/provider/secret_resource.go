@@ -53,9 +53,9 @@ func (r *secretResource) Schema(ctx context.Context, req resource.SchemaRequest,
 		MarkdownDescription: "A secret, referenced by name from the `secrets` section of a model's config.\n\n" +
 			"Baseten never returns a secret's value, so the provider cannot detect a value changed outside " +
 			"Terraform.\n\n" +
-			"~> Terraform has no dependency edge between a secret and the model that reads it, because the " +
-			"reference lives in the model's config rather than in Terraform. Use `depends_on` to ensure a secret " +
-			"exists before a model that needs it is pushed.",
+			"Terraform has no dependency edge between a secret and the model that reads it, because the " +
+			"reference lives in the model's config rather than in Terraform. Use `depends_on` to ensure a " +
+			"secret exists before a model that needs it is pushed.",
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Name of the secret. Changing this creates a new secret and deletes the old one.",

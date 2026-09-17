@@ -1,0 +1,124 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+{{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{ .Description | trimspace }}
+
+## Example Usage
+
+{{ tffile "examples/resources/baseten_api_key/resource.tf" }}
+
+## Rotating a key
+
+Rotation happens on `terraform apply`, not on a schedule Baseten keeps. Keys have
+no server-side expiration, so nothing rotates unless something keeps applying.
+
+{{ tffile "examples/resources/baseten_api_key/resource-rotating.tf" }}
+
+Terraform destroys the old key and creates its replacement under the same name
+within the one apply, so there are a few seconds in which no valid key exists.
+That default ordering is what makes reusing the name possible.
+
+`create_before_destroy` avoids the gap, but a key's name has to be unique among
+keys that have not been revoked, and during a create-before-destroy replacement
+both exist at once. The scope of that rule depends on `type`:
+
+| `type` | `name` must be unique among |
+| --- | --- |
+| `WORKSPACE_INVOKE`, `WORKSPACE_EXPORT_METRICS`, `WORKSPACE_MANAGE_ALL` | every non-personal key in the same team, whatever its type |
+| `WORKSPACE_MANAGE_API_KEYS` | other keys of that type in the organization |
+| `PERSONAL` | your own personal keys |
+
+The cross-type team scope catches people out on a first apply too: two keys named
+`inference` in one team collide even with different types.
+
+So to rotate without a gap, either leave `name` unset, since the rule only applies
+to keys that have one, or vary it:
+
+```terraform
+resource "baseten_api_key" "inference" {
+  name = "inference-${time_rotating.inference.rfc3339}"
+  type = "WORKSPACE_INVOKE"
+
+  rotate_when_changed = {
+    rotated_at = time_rotating.inference.rfc3339
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+## Limiting a key to specific models
+
+{{ tffile "examples/resources/baseten_api_key/resource-scoped-models.tf" }}
+
+`model_ids` takes IDs, not names, because Terraform already resolves names: a
+managed model exposes `.id`, and `data.baseten_model` looks one up by name and
+fails loudly on an ambiguous one rather than guessing.
+
+Baseten accepts `model_ids` only for `WORKSPACE_INVOKE` and
+`WORKSPACE_EXPORT_METRICS`, and rejects it for every other `type`.
+
+## Team-scoped keys
+
+{{ tffile "examples/resources/baseten_api_key/resource-team.tf" }}
+
+`PERSONAL` and `WORKSPACE_MANAGE_API_KEYS` keys cannot be team-scoped.
+
+## Which types you can create
+
+The provider authenticates with an API key of its own, and what that key is
+decides which types it may create. A personal key acts as the user it belongs to;
+a workspace key acts as a service account.
+
+| `type` | With a personal key | With a workspace key |
+| --- | --- | --- |
+| `WORKSPACE_INVOKE` | yes, as a team or organization admin | yes, with permission to manage API keys or the team |
+| `WORKSPACE_EXPORT_METRICS` | same | same |
+| `WORKSPACE_MANAGE_ALL` | same | same |
+| `WORKSPACE_MANAGE_API_KEYS` | organization admins only | no |
+| `PERSONAL` | yes, owned by that user | no |
+
+A `PERSONAL` key created through Terraform belongs to whoever ran the apply and
+disappears with their account, which rarely suits infrastructure as code.
+
+## Managing many keys
+
+Use `for_each` over a map rather than `count` over a list. Removing one element
+of a list shifts every later index, so Terraform would replace all the keys after
+the one you removed, rotating credentials you did not mean to touch.
+
+```terraform
+resource "baseten_api_key" "service" {
+  for_each = toset(["billing", "ingest", "search"])
+
+  name = each.key
+  type = "WORKSPACE_INVOKE"
+}
+```
+
+## Importing
+
+A key is imported by its prefix:
+
+```shell
+terraform import baseten_api_key.inference abcd1234
+```
+
+`api_key` is null afterwards, because Baseten returns a key's value only when it
+is created. A configuration that feeds `api_key` into something else cannot adopt
+an existing key; it has to create one.
+
+Refreshing fills in `team_name`, so a team-scoped key should be imported against
+a configuration that names its team that way. `team_id` cannot be recovered,
+because Baseten reports a key's team by name only, and a configuration setting
+`team_id` on an imported key replaces it.
+
+{{ .SchemaMarkdown | trimspace }}
