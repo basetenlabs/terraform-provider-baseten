@@ -127,11 +127,14 @@ func (r *apiKeyResource) Schema(ctx context.Context, req resource.SchemaRequest,
 			},
 			"team_name": schema.StringAttribute{
 				MarkdownDescription: "Name of the team owning the key, resolved to an ID. Conflicts with " +
-					"`team_id`. Recorded only as written here, because Baseten does not return it when " +
-					"creating a key.",
+					"`team_id`. Filled in from Baseten when left unset, including for a key that belongs to " +
+					"the default team. Import a team-scoped key with this rather than `team_id`, which " +
+					"Baseten does not report and so cannot be recovered.",
 				Optional: true,
+				Computed: true,
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.RequiresReplaceIfConfigured(),
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"rotate_when_changed": schema.MapAttribute{
@@ -254,6 +257,11 @@ func (r *apiKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 	plan.APIKey = types.StringValue(key.ApiKey)
 	plan.Prefix = types.StringValue(prefix)
 	plan.TeamID = apiKeyTeamIDValue(teamID)
+	// Computed, so it cannot be left unknown. Creating a key reports nothing
+	// about its team, so an unconfigured name waits for the first read.
+	if !modelIsSet(plan.TeamName) {
+		plan.TeamName = types.StringNull()
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -293,7 +301,20 @@ func (r *apiKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		state.ModelIDs = modelIDs
+		// Baseten reports a key scoped to no models the same way as one scoped to
+		// every model, so an empty set is kept rather than collapsed to null: the
+		// two differ in the configuration, and reporting the wrong one would
+		// disagree with it forever, replacing the key on every apply.
+		if !modelIDs.IsNull() || !apiKeyIsEmptySet(state.ModelIDs) {
+			state.ModelIDs = modelIDs
+		}
+		// The team ID is not reported, so this is the only way an imported key
+		// learns which team owns it. team_id stays as it was, null for an import.
+		if key.TeamName == nil {
+			state.TeamName = types.StringNull()
+		} else {
+			state.TeamName = types.StringValue(*key.TeamName)
+		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 		return
 	}
@@ -347,4 +368,10 @@ func apiKeyModelIDs(ctx context.Context, modelIDs *[]string) (types.Set, diag.Di
 		return types.SetNull(types.StringType), nil
 	}
 	return types.SetValueFrom(ctx, types.StringType, *modelIDs)
+}
+
+// apiKeyIsEmptySet reports a set that is present but holds nothing, which the
+// configuration can say and the API cannot.
+func apiKeyIsEmptySet(value types.Set) bool {
+	return !value.IsNull() && !value.IsUnknown() && len(value.Elements()) == 0
 }

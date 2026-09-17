@@ -116,4 +116,9 @@ terraform import baseten_api_key.inference abcd1234
 is created. A configuration that feeds `api_key` into something else cannot adopt
 an existing key; it has to create one.
 
+Refreshing fills in `team_name`, so a team-scoped key should be imported against
+a configuration that names its team that way. `team_id` cannot be recovered,
+because Baseten reports a key's team by name only, and a configuration setting
+`team_id` on an imported key replaces it.
+
 {{ .SchemaMarkdown | trimspace }}

@@ -186,6 +186,85 @@ func TestAPIKeyResourceCreateSendsNameAndModelIDs(t *testing.T) {
 	}
 }
 
+// Baseten reports "scoped to no models" and "scoped to every model" alike, so a
+// read that collapsed a configured empty set to null would disagree with the
+// configuration forever, replacing the key on every apply.
+func TestAPIKeyResourceReadKeepsEmptyModelIDs(t *testing.T) {
+	ctx := t.Context()
+	r := newAPIKeyResource()
+	apiKeySchema, objectType := apiKeyTestSchema(t, r)
+
+	_, managementClient := newFakeAPI(t, map[string]any{
+		"GET /v1/api_keys": managementapi.APIKeys{Keys: []managementapi.APIKeyInfo{
+			{Prefix: "abcd1234", Type: managementapi.APIKeyCategory_WORKSPACE_INVOKE},
+		}},
+	})
+	r.(*apiKeyResource).client = managementClient
+
+	values := apiKeyTestValues()
+	values["prefix"] = tftypes.NewValue(tftypes.String, "abcd1234")
+	values["model_ids"] = tftypes.NewValue(tftypes.Set{ElementType: tftypes.String}, []tftypes.Value{})
+	stateRaw := tftypes.NewValue(objectType, values)
+
+	resp := &fwresource.ReadResponse{State: tfsdk.State{Schema: apiKeySchema, Raw: stateRaw}}
+	r.Read(ctx, fwresource.ReadRequest{State: tfsdk.State{Schema: apiKeySchema, Raw: stateRaw}}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	var got apiKeyResourceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	if got.ModelIDs.IsNull() {
+		t.Error("got null model_ids, want the empty set preserved")
+	}
+	if elements := got.ModelIDs.Elements(); len(elements) != 0 {
+		t.Errorf("got model_ids %v, want empty", elements)
+	}
+}
+
+// An imported key seeds only its prefix, so the refresh is the only chance to
+// learn which team owns it. Without this, a team key reads as default-team
+// scoped and a configuration naming its real team replaces it.
+func TestAPIKeyResourceReadPopulatesTeamName(t *testing.T) {
+	ctx := t.Context()
+	r := newAPIKeyResource()
+	apiKeySchema, objectType := apiKeyTestSchema(t, r)
+
+	teamName := "research"
+	_, managementClient := newFakeAPI(t, map[string]any{
+		"GET /v1/api_keys": managementapi.APIKeys{Keys: []managementapi.APIKeyInfo{
+			{
+				Prefix:   "abcd1234",
+				Type:     managementapi.APIKeyCategory_WORKSPACE_INVOKE,
+				TeamName: &teamName,
+			},
+		}},
+	})
+	r.(*apiKeyResource).client = managementClient
+
+	values := apiKeyTestValues()
+	values["prefix"] = tftypes.NewValue(tftypes.String, "abcd1234")
+	stateRaw := tftypes.NewValue(objectType, values)
+
+	resp := &fwresource.ReadResponse{State: tfsdk.State{Schema: apiKeySchema, Raw: stateRaw}}
+	r.Read(ctx, fwresource.ReadRequest{State: tfsdk.State{Schema: apiKeySchema, Raw: stateRaw}}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	var got apiKeyResourceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("reading resulting state: %v", diags)
+	}
+	if got.TeamName.ValueString() != teamName {
+		t.Errorf("got team_name %q, want %q", got.TeamName.ValueString(), teamName)
+	}
+}
+
 func TestAPIKeyResourceRead(t *testing.T) {
 	name := "ci"
 	tests := []struct {
