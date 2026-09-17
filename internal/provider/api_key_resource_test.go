@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/basetenlabs/baseten-go/client/managementapi"
@@ -138,7 +139,7 @@ func TestAPIKeyResourceCreateSendsNameAndModelIDs(t *testing.T) {
 	r := newAPIKeyResource()
 	apiKeySchema, objectType := apiKeyTestSchema(t, r)
 
-	_, managementClient := newFakeAPI(t, map[string]any{
+	fake, managementClient := newFakeAPI(t, map[string]any{
 		"POST /v1/api_keys": managementapi.APIKey{ApiKey: "abcd1234.Zm9vYmFy"},
 	})
 	r.(*apiKeyResource).client = managementClient
@@ -159,17 +160,29 @@ func TestAPIKeyResourceCreateSendsNameAndModelIDs(t *testing.T) {
 		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
 	}
 
-	var got apiKeyResourceModel
-	if diags := resp.State.Get(ctx, &got); diags.HasError() {
-		t.Fatalf("reading resulting state: %v", diags)
+	// Asserted against the recorded request rather than the resulting state,
+	// which only ever echoes the plan and so cannot catch a dropped field.
+	posts := fake.requestsTo("POST", "/v1/api_keys")
+	if len(posts) != 1 {
+		t.Fatalf("got %d POSTs to /v1/api_keys, want 1", len(posts))
 	}
-	// model_ids round-trips from the plan, since creating a key returns no metadata.
-	var modelIDs []string
-	if diags := got.ModelIDs.ElementsAs(ctx, &modelIDs, false); diags.HasError() {
-		t.Fatalf("reading model_ids: %v", diags)
+	var sent managementapi.CreateAPIKeyRequest
+	if err := json.Unmarshal([]byte(posts[0].Body), &sent); err != nil {
+		t.Fatalf("decoding request body %q: %v", posts[0].Body, err)
 	}
-	if len(modelIDs) != 1 || modelIDs[0] != "model-a" {
-		t.Errorf("got model_ids %v, want [model-a]", modelIDs)
+	if sent.Type != managementapi.APIKeyCategory_WORKSPACE_INVOKE {
+		t.Errorf("got type %q, want %q", sent.Type, managementapi.APIKeyCategory_WORKSPACE_INVOKE)
+	}
+	if sent.Name == nil {
+		t.Error("got no name in the request, want ci")
+	} else if *sent.Name != "ci" {
+		t.Errorf("got name %q, want %q", *sent.Name, "ci")
+	}
+	if sent.ModelIds == nil {
+		t.Fatal("got no model_ids in the request, want [model-a]")
+	}
+	if len(*sent.ModelIds) != 1 || (*sent.ModelIds)[0] != "model-a" {
+		t.Errorf("got model_ids %v, want [model-a]", *sent.ModelIds)
 	}
 }
 

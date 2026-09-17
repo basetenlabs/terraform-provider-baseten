@@ -266,6 +266,11 @@ func (r *apiKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 
 	// There is no get-by-prefix endpoint, so the list is filtered here. It holds
 	// only keys that have not been revoked, so a revoked key reads as absent.
+	//
+	// This does not branch on the team the way secretResource.Read does, because
+	// there is no team-scoped listing to branch to: only creation has a team
+	// route. One listing already covers team keys, since the endpoint returns the
+	// caller's personal keys alongside every non-personal key they can manage.
 	keys, err := r.client.API().GetApiKeys(ctx)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read Baseten API keys", err.Error())
