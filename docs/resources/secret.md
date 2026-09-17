@@ -4,7 +4,7 @@ subcategory: ""
 description: |-
   A secret, referenced by name from the secrets section of a model's config.
   Baseten never returns a secret's value, so the provider cannot detect a value changed outside Terraform.
-  ~> Terraform has no dependency edge between a secret and the model that reads it, because the reference lives in the model's config rather than in Terraform. Use depends_on to ensure a secret exists before a model that needs it is pushed.
+  Terraform has no dependency edge between a secret and the model that reads it, because the reference lives in the model's config rather than in Terraform. Use depends_on to ensure a secret exists before a model that needs it is pushed.
 ---
 
 # baseten_secret (Resource)
@@ -13,7 +13,7 @@ A secret, referenced by name from the `secrets` section of a model's config.
 
 Baseten never returns a secret's value, so the provider cannot detect a value changed outside Terraform.
 
-~> Terraform has no dependency edge between a secret and the model that reads it, because the reference lives in the model's config rather than in Terraform. Use `depends_on` to ensure a secret exists before a model that needs it is pushed.
+Terraform has no dependency edge between a secret and the model that reads it, because the reference lives in the model's config rather than in Terraform. Use `depends_on` to ensure a secret exists before a model that needs it is pushed.
 
 ## Example Usage
 

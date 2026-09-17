@@ -46,8 +46,8 @@ func (p *basetenProvider) Metadata(ctx context.Context, req provider.MetadataReq
 
 func (p *basetenProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages Baseten models, deployments, and secrets.\n\n" +
-			"!> Set the API key with the `BASETEN_API_KEY` environment variable, or from a variable your " +
+		MarkdownDescription: "Manages Baseten models, deployments, secrets, and API keys.\n\n" +
+			"Set the API key with the `BASETEN_API_KEY` environment variable, or from a variable your " +
 			"secret manager supplies. A key written into a Terraform configuration ends up in version " +
 			"control, and one passed as an argument is also recorded in plan files.",
 		Attributes: map[string]schema.Attribute{
@@ -129,6 +129,7 @@ func (p *basetenProvider) Configure(ctx context.Context, req provider.ConfigureR
 
 func (p *basetenProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
+		newAPIKeyResource,
 		newModelResource,
 		newSecretResource,
 	}

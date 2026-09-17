@@ -1,15 +1,15 @@
 ---
 page_title: "Provider: Baseten"
 description: |-
-  Manages Baseten models, deployments, and secrets.
-  !> Set the API key with the BASETEN_API_KEY environment variable, or from a variable your secret manager supplies. A key written into a Terraform configuration ends up in version control, and one passed as an argument is also recorded in plan files.
+  Manages Baseten models, deployments, secrets, and API keys.
+  Set the API key with the BASETEN_API_KEY environment variable, or from a variable your secret manager supplies. A key written into a Terraform configuration ends up in version control, and one passed as an argument is also recorded in plan files.
 ---
 
 # Baseten Provider
 
-Manages Baseten models, deployments, and secrets.
+Manages Baseten models, deployments, secrets, and API keys.
 
-!> Set the API key with the `BASETEN_API_KEY` environment variable, or from a variable your secret manager supplies. A key written into a Terraform configuration ends up in version control, and one passed as an argument is also recorded in plan files.
+Set the API key with the `BASETEN_API_KEY` environment variable, or from a variable your secret manager supplies. A key written into a Terraform configuration ends up in version control, and one passed as an argument is also recorded in plan files.
 
 ## Example Usage
 
