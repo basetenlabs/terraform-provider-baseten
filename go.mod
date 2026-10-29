@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.36
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.3.14
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.107.2
-	github.com/basetenlabs/baseten-go v0.2.1-0.20260820160010-227e6f013b03
+	github.com/basetenlabs/baseten-go v0.5.1-0.20261029150941-c073a014b3b7
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-framework-timeouts v0.7.0
 	github.com/hashicorp/terraform-plugin-go v0.31.0

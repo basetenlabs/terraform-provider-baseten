@@ -50,16 +50,17 @@ const (
 // writes it, and a promotion is not what a push does, so acting on it would
 // surprise people in the more expensive direction.
 type modelPushModel struct {
-	ConfigDir               types.String  `tfsdk:"config_dir"`
-	Config                  types.Dynamic `tfsdk:"config"`
-	SourceHash              types.String  `tfsdk:"source_hash"`
-	Triggers                types.Map     `tfsdk:"triggers"`
-	Environment             types.String  `tfsdk:"environment"`
-	DeploymentName          types.String  `tfsdk:"deployment_name"`
-	Labels                  types.Map     `tfsdk:"labels"`
-	Wait                    types.Bool    `tfsdk:"wait"`
-	DeployTimeoutMinutes    types.Int64   `tfsdk:"deploy_timeout_minutes"`
-	PreserveEnvInstanceType types.Bool    `tfsdk:"preserve_env_instance_type"`
+	ConfigDir                  types.String  `tfsdk:"config_dir"`
+	Config                     types.Dynamic `tfsdk:"config"`
+	SourceHash                 types.String  `tfsdk:"source_hash"`
+	Triggers                   types.Map     `tfsdk:"triggers"`
+	Environment                types.String  `tfsdk:"environment"`
+	DeploymentName             types.String  `tfsdk:"deployment_name"`
+	Labels                     types.Map     `tfsdk:"labels"`
+	Wait                       types.Bool    `tfsdk:"wait"`
+	DeployTimeoutMinutes       types.Int64   `tfsdk:"deploy_timeout_minutes"`
+	PreserveEnvInstanceType    types.Bool    `tfsdk:"preserve_env_instance_type"`
+	CreateEnvironmentIfMissing types.Bool    `tfsdk:"create_environment_if_missing"`
 }
 
 func modelPushSchemaAttributes() map[string]schema.Attribute {
@@ -101,7 +102,8 @@ func modelPushSchemaAttributes() map[string]schema.Attribute {
 			ElementType: types.StringType,
 		},
 		"environment": schema.StringAttribute{
-			MarkdownDescription: "Environment the next push deploys into, created if it does not exist.\n\n" +
+			MarkdownDescription: "Environment the next push deploys into. Pushing to an environment the model " +
+				"does not have yet fails unless `create_environment_if_missing` is true.\n\n" +
 				"Changing this does not push, and does not move the deployment already running. It applies to " +
 				"the next push, the same way `--environment` applies to `baseten model push`. To move what is " +
 				"deployed now, promote it outside Terraform.",
@@ -139,7 +141,14 @@ func modelPushSchemaAttributes() map[string]schema.Attribute {
 		},
 		"preserve_env_instance_type": schema.BoolAttribute{
 			MarkdownDescription: "Whether a push into `environment` keeps that environment's current instance " +
-				"type instead of the one in the configuration. Defaults to true at Baseten.\n\n" +
+				"type instead of the one in the configuration. Defaults to false.\n\n" +
+				"Changing this does not push. It applies to the next push.",
+			Optional: true,
+		},
+		"create_environment_if_missing": schema.BoolAttribute{
+			MarkdownDescription: "Whether a push creates `environment` when the model does not have it yet. " +
+				"Defaults to false, so pushing to an environment that does not exist fails. Only meaningful " +
+				"for an environment other than production, which every model has.\n\n" +
 				"Changing this does not push. It applies to the next push.",
 			Optional: true,
 		},
@@ -168,11 +177,12 @@ func modelPushDeploys(planned, prior modelPushModel) bool {
 // carry them, so a plan never silently drops an edit.
 func modelPushDeferredChanges(planned, prior modelPushModel) []string {
 	changed := map[string]bool{
-		"deploy_timeout_minutes":     !planned.DeployTimeoutMinutes.Equal(prior.DeployTimeoutMinutes),
-		"deployment_name":            !planned.DeploymentName.Equal(prior.DeploymentName),
-		"environment":                !planned.Environment.Equal(prior.Environment),
-		"labels":                     !planned.Labels.Equal(prior.Labels),
-		"preserve_env_instance_type": !planned.PreserveEnvInstanceType.Equal(prior.PreserveEnvInstanceType),
+		"create_environment_if_missing": !planned.CreateEnvironmentIfMissing.Equal(prior.CreateEnvironmentIfMissing),
+		"deploy_timeout_minutes":        !planned.DeployTimeoutMinutes.Equal(prior.DeployTimeoutMinutes),
+		"deployment_name":               !planned.DeploymentName.Equal(prior.DeploymentName),
+		"environment":                   !planned.Environment.Equal(prior.Environment),
+		"labels":                        !planned.Labels.Equal(prior.Labels),
+		"preserve_env_instance_type":    !planned.PreserveEnvInstanceType.Equal(prior.PreserveEnvInstanceType),
 	}
 	deferred := make([]string, 0, len(changed))
 	for name, differs := range changed {
@@ -277,9 +287,8 @@ func modelPushResolveSource(ctx context.Context, push modelPushModel, modelName 
 
 	source.options.DeploymentName = push.DeploymentName.ValueString()
 	source.options.EnvironmentName = push.Environment.ValueString()
-	if modelIsSet(push.PreserveEnvInstanceType) {
-		source.options.OverrideEnvInstanceType = !push.PreserveEnvInstanceType.ValueBool()
-	}
+	source.options.PreserveEnvInstanceType = push.PreserveEnvInstanceType.ValueBool()
+	source.options.CreateEnvironmentIfMissing = push.CreateEnvironmentIfMissing.ValueBool()
 	if modelIsSet(push.DeployTimeoutMinutes) {
 		source.options.DeployTimeoutMinutes = int(push.DeployTimeoutMinutes.ValueInt64())
 	}

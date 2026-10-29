@@ -899,28 +899,47 @@ func (r *modelResource) reconcileEnvironments(
 	entries := make(map[string]modelEnvironmentModel, len(plannedEntries))
 	for _, name := range modelSortedNames(plannedEntries) {
 		plannedEntry := plannedEntries[name]
-		autoscaling, autoscalingDiags := modelAutoscalingUpdate(ctx, plannedEntry.Autoscaling)
+		environment, found := existing[name]
+
+		// An existing environment is sent only what differs from what it reports
+		// now. A new one has nothing to differ from, so it gets every planned value.
+		autoscalingChanges, promotionChanges := plannedEntry.Autoscaling, plannedEntry.Promotion
+		currentRequestBackpressure := types.ObjectNull(attrTypesOf(modelRequestBackpressureSchemaAttributes()))
+		if found {
+			current, currentDiags := modelEnvironmentFromAPI(ctx, environment)
+			diags.Append(currentDiags...)
+			var changedDiags diag.Diagnostics
+			autoscalingChanges, changedDiags = modelChangedSettings(ctx, plannedEntry.Autoscaling, current.Autoscaling)
+			diags.Append(changedDiags...)
+			promotionChanges, changedDiags = modelChangedSettings(ctx, plannedEntry.Promotion, current.Promotion)
+			diags.Append(changedDiags...)
+			currentRequestBackpressure = current.RequestBackpressure
+		}
+		autoscaling, autoscalingDiags := modelAutoscalingUpdate(ctx, autoscalingChanges)
 		diags.Append(autoscalingDiags...)
-		promotion, promotionDiags := modelPromotionUpdate(ctx, plannedEntry.Promotion)
+		promotion, promotionDiags := modelPromotionUpdate(ctx, promotionChanges)
 		diags.Append(promotionDiags...)
+		requestBackpressure, requestBackpressureDiags := modelRequestBackpressureUpdate(
+			ctx, plannedEntry.RequestBackpressure, currentRequestBackpressure)
+		diags.Append(requestBackpressureDiags...)
 		if diags.HasError() {
 			return types.MapNull(environmentType), diags
 		}
 
-		environment, found := existing[name]
 		switch {
 		case !found:
 			created, err := r.client.API().PostModelsEnvironments(ctx, modelID, managementapi.CreateEnvironmentRequest{
-				Name:                name,
-				AutoscalingSettings: autoscaling,
-				PromotionSettings:   promotion,
+				Name:                        name,
+				AutoscalingSettings:         autoscaling,
+				PromotionSettings:           promotion,
+				RequestBackpressureSettings: requestBackpressure,
 			})
 			if err != nil {
 				diags.AddError(fmt.Sprintf("Unable to create Baseten environment %q", name), err.Error())
 				return types.MapNull(environmentType), diags
 			}
 			environment = created
-		case autoscaling != nil || promotion != nil:
+		case autoscaling != nil || promotion != nil || requestBackpressure != nil:
 			if promotion != nil && environment.InProgressPromotion != nil {
 				diags.AddWarning(
 					fmt.Sprintf("Promotion in progress on environment %q", name),
@@ -929,8 +948,9 @@ func (r *modelResource) reconcileEnvironments(
 				)
 			}
 			response, err := r.client.API().PatchModelsEnvironments(ctx, modelID, name, managementapi.UpdateEnvironmentRequest{
-				AutoscalingSettings: autoscaling,
-				PromotionSettings:   promotion,
+				AutoscalingSettings:         autoscaling,
+				PromotionSettings:           promotion,
+				RequestBackpressureSettings: requestBackpressure,
 			})
 			if err != nil {
 				diags.AddError(fmt.Sprintf("Unable to update Baseten environment %q", name), err.Error())
@@ -974,11 +994,15 @@ func (r *modelResource) reconcileEnvironments(
 		diags.Append(mergeDiags...)
 		mergedPromotion, mergeDiags := modelMergeSettings(ctx, plannedEntry.Promotion, fetchedEntry.Promotion)
 		diags.Append(mergeDiags...)
+		mergedRequestBackpressure, mergeDiags := modelMergeSettings(
+			ctx, plannedEntry.RequestBackpressure, fetchedEntry.RequestBackpressure)
+		diags.Append(mergeDiags...)
 		if diags.HasError() {
 			return types.MapNull(environmentType), diags
 		}
 		fetchedEntry.Autoscaling = mergedAutoscaling
 		fetchedEntry.Promotion = mergedPromotion
+		fetchedEntry.RequestBackpressure = mergedRequestBackpressure
 		entries[name] = fetchedEntry
 	}
 

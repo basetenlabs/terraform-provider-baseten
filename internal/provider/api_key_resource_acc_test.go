@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/basetenlabs/baseten-go/client/managementapi"
 	"github.com/hashicorp/terraform-plugin-testing/compare"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
@@ -126,7 +127,7 @@ func TestAccAPIKey(t *testing.T) {
 func accAPIKeyPrefixesByName(ctx context.Context, t *testing.T, name string) []string {
 	t.Helper()
 
-	keys, err := accClient(t).API().GetApiKeys(ctx)
+	keys, err := accClient(t).API().GetApiKeys(ctx, managementapi.GetV1ApiKeysParams{})
 	if err != nil {
 		t.Fatalf("listing API keys: %v", err)
 	}
@@ -144,7 +145,7 @@ func accAPIKeyPrefixesByName(ctx context.Context, t *testing.T, name string) []s
 func accAPIKeyExists(ctx context.Context, t *testing.T, prefix string) bool {
 	t.Helper()
 
-	keys, err := accClient(t).API().GetApiKeys(ctx)
+	keys, err := accClient(t).API().GetApiKeys(ctx, managementapi.GetV1ApiKeysParams{})
 	if err != nil {
 		t.Fatalf("listing API keys: %v", err)
 	}

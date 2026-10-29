@@ -173,6 +173,63 @@ func TestModelResourceCreateUpsertsEnvironments(t *testing.T) {
 	}
 }
 
+// A PATCH carries only the settings that differ from what Baseten reports, and an
+// environment with nothing different is not patched at all.
+func TestModelResourceCreatePatchesOnlyChangedSettings(t *testing.T) {
+	r, fake, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models": managementapi.Models{Models: []managementapi.Model{{
+			Id: "model-1", Name: "whisper", TeamName: "Default Team", CreatedAt: testTimestamp(t),
+		}}},
+		"GET /v1/models/model-1/environments": managementapi.Environments{
+			Environments: []managementapi.Environment{
+				testAPIEnvironment(t, "production", 1),
+				testAPIEnvironment(t, "staging", 0),
+			},
+		},
+		"PATCH /v1/models/model-1/environments/production": managementapi.UpdateAutoscalingSettingsResponse{
+			Status: managementapi.UpdateAutoscalingSettingsStatus_ACCEPTED,
+		},
+		"GET /v1/models/model-1/environments/production": testAPIEnvironment(t, "production", 3),
+	})
+
+	plan := tfsdk.Plan{Schema: modelSchema, Raw: testModelPlanValue(t, modelSchema, modelResourceModel{
+		Name:                          types.StringValue("whisper"),
+		EnvironmentDeletionProtection: types.BoolValue(true),
+		Environments: testModelPlanEnvironments(t, map[string]modelEnvironmentModel{
+			"production": {
+				Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
+					MinReplica:        types.Int64Value(3),
+					MaxReplica:        types.Int64Value(4),
+					ConcurrencyTarget: types.Int64Value(1),
+				}),
+			},
+			"staging": {
+				Autoscaling: testModelObject(t, modelAutoscalingSchemaAttributes(), &modelAutoscalingModel{
+					MaxReplica: types.Int64Value(4),
+				}),
+			},
+		}),
+	})}
+
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
+	}
+
+	patches := fake.requestsTo("PATCH", "/v1/models/model-1/environments/production")
+	if len(patches) != 1 {
+		t.Fatalf("got %d PATCHes to production, want 1", len(patches))
+	}
+	if body := patches[0].Body; !strings.Contains(body, `"min_replica":3`) ||
+		strings.Contains(body, "max_replica") || strings.Contains(body, "concurrency_target") {
+		t.Errorf("got production PATCH body %q, want only min_replica 3", body)
+	}
+	if patches := fake.requestsTo("PATCH", "/v1/models/model-1/environments/staging"); len(patches) != 0 {
+		t.Errorf("got %d PATCHes to staging, want none since nothing differs", len(patches))
+	}
+}
+
 // A configured team_name has to narrow the lookup, since model names are unique
 // only within a team. On a create team_id is unknown, so mistaking unknown for a
 // set value would search the whole organization and adopt another team's model.
@@ -1303,6 +1360,9 @@ func testModelEnvironments(t *testing.T, entries map[string]modelEnvironmentMode
 		if len(entry.Promotion.AttributeTypes(t.Context())) == 0 {
 			entry.Promotion = types.ObjectNull(attrTypesOf(modelPromotionSchemaAttributes()))
 		}
+		if len(entry.RequestBackpressure.AttributeTypes(t.Context())) == 0 {
+			entry.RequestBackpressure = types.ObjectNull(attrTypesOf(modelRequestBackpressureSchemaAttributes()))
+		}
 		entries[name] = entry
 	}
 
@@ -1347,7 +1407,7 @@ func testAPIEnvironment(t *testing.T, name string, minReplica int) managementapi
 			MaxReplica:        4,
 			ConcurrencyTarget: 1,
 		},
-		PromotionSettings: managementapi.PromotionSettings{},
+		PromotionSettings: managementapi.ModelPromotionSettings{},
 		InstanceType:      managementapi.InstanceType{Id: "1x2", Name: "1x2"},
 	}
 }

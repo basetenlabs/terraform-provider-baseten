@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
 // Settings attributes are all Optional+Computed, so deleting a line means "leave
@@ -21,10 +22,18 @@ import (
 // objects stay as types.Object rather than Go structs because a newly added
 // entry plans them unknown, which a struct pointer cannot represent.
 type modelEnvironmentModel struct {
-	Autoscaling      types.Object `tfsdk:"autoscaling"`
-	Promotion        types.Object `tfsdk:"promotion"`
-	CreatedAt        types.String `tfsdk:"created_at"`
-	InstanceTypeName types.String `tfsdk:"instance_type_name"`
+	Autoscaling         types.Object `tfsdk:"autoscaling"`
+	Promotion           types.Object `tfsdk:"promotion"`
+	RequestBackpressure types.Object `tfsdk:"request_backpressure"`
+	CreatedAt           types.String `tfsdk:"created_at"`
+	InstanceTypeName    types.String `tfsdk:"instance_type_name"`
+}
+
+// modelRequestBackpressureModel is exact once configured: Policy is Optional
+// without Computed, so a configured block with no policy means none, and clears
+// one Baseten has.
+type modelRequestBackpressureModel struct {
+	Policy types.String `tfsdk:"policy"`
 }
 
 type modelAutoscalingModel struct {
@@ -73,6 +82,13 @@ func modelEnvironmentSchemaAttributes() map[string]schema.Attribute {
 			Optional:   true,
 			Computed:   true,
 			Attributes: modelPromotionSchemaAttributes(),
+		},
+		"request_backpressure": schema.SingleNestedAttribute{
+			MarkdownDescription: "Request backpressure settings for the environment. Left out, the current " +
+				"settings are kept. Once set, the block is exact: leaving out `policy` clears it.",
+			Optional:   true,
+			Computed:   true,
+			Attributes: modelRequestBackpressureSchemaAttributes(),
 		},
 		"created_at": schema.StringAttribute{
 			MarkdownDescription: "Time the environment was created, in ISO 8601 format.",
@@ -170,6 +186,16 @@ func modelPromotionSchemaAttributes() map[string]schema.Attribute {
 			Optional:   true,
 			Computed:   true,
 			Attributes: modelRollingDeploySchemaAttributes(),
+		},
+	}
+}
+
+func modelRequestBackpressureSchemaAttributes() map[string]schema.Attribute {
+	return map[string]schema.Attribute{
+		"policy": schema.StringAttribute{
+			MarkdownDescription: "Backpressure policy to apply. One of `QUEUE_ON_FULL` or `REJECT_ON_FULL`. " +
+				"Null indicates no policy, clearing an existing one.",
+			Optional: true,
 		},
 	}
 }
@@ -276,11 +302,20 @@ func modelEnvironmentFromAPI(ctx context.Context, environment *managementapi.Env
 	promotion, promotionDiags := types.ObjectValueFrom(ctx, attrTypesOf(modelPromotionSchemaAttributes()), &promotionSettings)
 	diags.Append(promotionDiags...)
 
+	requestBackpressureSettings := modelRequestBackpressureModel{Policy: types.StringNull()}
+	if policy := environment.RequestBackpressureSettings.Policy; policy != nil {
+		requestBackpressureSettings.Policy = types.StringValue(string(*policy))
+	}
+	requestBackpressure, requestBackpressureDiags := types.ObjectValueFrom(
+		ctx, attrTypesOf(modelRequestBackpressureSchemaAttributes()), &requestBackpressureSettings)
+	diags.Append(requestBackpressureDiags...)
+
 	entry = modelEnvironmentModel{
-		Autoscaling:      autoscaling,
-		Promotion:        promotion,
-		CreatedAt:        types.StringValue(environment.CreatedAt.Format(time.RFC3339)),
-		InstanceTypeName: types.StringValue(environment.InstanceType.Name),
+		Autoscaling:         autoscaling,
+		Promotion:           promotion,
+		RequestBackpressure: requestBackpressure,
+		CreatedAt:           types.StringValue(environment.CreatedAt.Format(time.RFC3339)),
+		InstanceTypeName:    types.StringValue(environment.InstanceType.Name),
 	}
 	return entry, diags
 }
@@ -313,14 +348,14 @@ func modelAutoscalingUpdate(ctx context.Context, object types.Object) (*manageme
 
 // modelPromotionUpdate builds the promotion payload, splitting the provider's
 // single rolling_deploy attribute back into the API's boolean and config.
-func modelPromotionUpdate(ctx context.Context, object types.Object) (*managementapi.UpdatePromotionSettings, diag.Diagnostics) {
+func modelPromotionUpdate(ctx context.Context, object types.Object) (*managementapi.UpdateModelPromotionSettings, diag.Diagnostics) {
 	var settings modelPromotionModel
 	diags := object.As(ctx, &settings, modelObjectAsOptions)
 	if diags.HasError() {
 		return nil, diags
 	}
 
-	update := managementapi.UpdatePromotionSettings{
+	update := managementapi.UpdateModelPromotionSettings{
 		RedeployOnPromotion:   modelBoolPointer(settings.RedeployOnPromotion),
 		RampUpWhilePromoting:  modelBoolPointer(settings.RampUpWhilePromoting),
 		RampUpDurationSeconds: modelIntPointer(settings.RampUpDurationSeconds),
@@ -358,6 +393,76 @@ func modelPromotionUpdate(ctx context.Context, object types.Object) (*management
 		return nil, diags
 	}
 	return &update, diags
+}
+
+// modelRequestBackpressureUpdate builds the backpressure payload when the planned
+// policy differs from current, which is null for an environment that does not
+// exist yet. It compares directly rather than through modelChangedSettings,
+// because a null policy here is a value, the one that clears it, and not an
+// absence. An unknown block is one the configuration left out, so nothing is
+// sent.
+func modelRequestBackpressureUpdate(
+	ctx context.Context,
+	planned, current types.Object,
+) (*managementapi.UpdateRequestBackpressureSettings, diag.Diagnostics) {
+	if !modelIsSet(planned) {
+		return nil, nil
+	}
+	var plannedSettings, currentSettings modelRequestBackpressureModel
+	diags := planned.As(ctx, &plannedSettings, modelObjectAsOptions)
+	diags.Append(current.As(ctx, &currentSettings, modelObjectAsOptions)...)
+	if diags.HasError() || plannedSettings.Policy.IsUnknown() || plannedSettings.Policy.Equal(currentSettings.Policy) {
+		return nil, diags
+	}
+
+	var policy *managementapi.RequestBackpressurePolicy
+	if !plannedSettings.Policy.IsNull() {
+		value := managementapi.RequestBackpressurePolicy(plannedSettings.Policy.ValueString())
+		policy = &value
+	}
+	return &managementapi.UpdateRequestBackpressureSettings{Policy: managementapi.NewOptional(policy)}, diags
+}
+
+// modelChangedSettings keeps only the planned settings that differ from what
+// Baseten reports, nulling the rest so the update builders leave them out. A
+// PATCH then carries only what changed, which matters beyond tidiness: Baseten
+// rejects some fields during a rolling promotion even when their value is the
+// same.
+func modelChangedSettings(ctx context.Context, planned, fetched types.Object) (types.Object, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	if !modelIsSet(planned) || !modelIsSet(fetched) {
+		return planned, diags
+	}
+
+	attrTypes := planned.AttributeTypes(ctx)
+	fetchedAttributes := fetched.Attributes()
+	changed := make(map[string]attr.Value, len(attrTypes))
+	for name, plannedValue := range planned.Attributes() {
+		fetchedValue := fetchedAttributes[name]
+		plannedObject, plannedIsObject := plannedValue.(types.Object)
+		fetchedObject, fetchedIsObject := fetchedValue.(types.Object)
+		if plannedIsObject && fetchedIsObject {
+			changedObject, changedDiags := modelChangedSettings(ctx, plannedObject, fetchedObject)
+			diags.Append(changedDiags...)
+			changed[name] = changedObject
+			continue
+		}
+		if !plannedValue.Equal(fetchedValue) {
+			changed[name] = plannedValue
+			continue
+		}
+		attrType := attrTypes[name]
+		null, err := attrType.ValueFromTerraform(ctx, tftypes.NewValue(attrType.TerraformType(ctx), nil))
+		if err != nil {
+			diags.AddError("Unable to compare environment settings", err.Error())
+			return planned, diags
+		}
+		changed[name] = null
+	}
+
+	changedObject, objectDiags := types.ObjectValue(attrTypes, changed)
+	diags.Append(objectDiags...)
+	return changedObject, diags
 }
 
 // modelMergeSettings decides what an apply records for a setting: what Baseten
