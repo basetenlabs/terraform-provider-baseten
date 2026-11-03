@@ -8,6 +8,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 )
@@ -67,35 +71,41 @@ func modelEnvironmentSchemaAttributes() map[string]schema.Attribute {
 			MarkdownDescription: "Request backpressure policy: `QUEUE_ON_FULL` or `REJECT_ON_FULL`. Set to an empty string to clear the policy. Omission preserves the current policy.",
 			Optional:            true,
 			Computed:            true,
+			PlanModifiers:       []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 		},
 		"autoscaling_schedule_timezone": schema.StringAttribute{
 			MarkdownDescription: "IANA timezone shared by autoscaling schedules, such as `America/Los_Angeles`. Required when creating the first recurring schedule. Omission preserves the current timezone. An empty string clears it, which requires removing every schedule.",
 			Optional:            true,
 			Computed:            true,
+			PlanModifiers:       []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 		},
 		"autoscaling_schedules": schema.MapNestedAttribute{
 			MarkdownDescription: "Autoscaling schedules keyed by unique schedule name. When configured, manages the entire collection: removing a key deletes that schedule, and `{}` clears all schedules. Omission leaves schedules unchanged. Schedule IDs are preserved when updating an existing name. Evaluated, time-dependent autoscaling state is not stored.",
 			Optional:            true,
 			Computed:            true,
+			PlanModifiers:       []planmodifier.Map{mapplanmodifier.UseNonNullStateForUnknown()},
 			NestedObject:        schema.NestedAttributeObject{Attributes: modelScheduleSchemaAttributes()},
 		},
 		"autoscaling": schema.SingleNestedAttribute{
 			MarkdownDescription: "Autoscaling settings for the environment. Attributes left out keep their " +
 				"current values rather than resetting to Baseten's defaults.",
-			Optional:   true,
-			Computed:   true,
-			Attributes: modelAutoscalingSchemaAttributes(),
+			Optional:      true,
+			Computed:      true,
+			PlanModifiers: []planmodifier.Object{objectplanmodifier.UseNonNullStateForUnknown()},
+			Attributes:    modelAutoscalingSchemaAttributes(),
 		},
 		"promotion": schema.SingleNestedAttribute{
 			MarkdownDescription: "Promotion settings for the environment. Attributes left out keep their " +
 				"current values rather than resetting to Baseten's defaults.",
-			Optional:   true,
-			Computed:   true,
-			Attributes: modelPromotionSchemaAttributes(),
+			Optional:      true,
+			Computed:      true,
+			PlanModifiers: []planmodifier.Object{objectplanmodifier.UseNonNullStateForUnknown()},
+			Attributes:    modelPromotionSchemaAttributes(),
 		},
 		"created_at": schema.StringAttribute{
 			MarkdownDescription: "Time the environment was created, in ISO 8601 format.",
 			Computed:            true,
+			PlanModifiers:       []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 		},
 		// Deployment status, replica counts, and in-flight promotions are deliberately
 		// absent: they move continuously without anyone asking, so Terraform would report
@@ -104,7 +114,8 @@ func modelEnvironmentSchemaAttributes() map[string]schema.Attribute {
 		"instance_type_name": schema.StringAttribute{
 			MarkdownDescription: "Display name of the instance type serving the environment. Read-only, " +
 				"because Baseten copies the instance type onto a new deployment rather than changing it in place.",
-			Computed: true,
+			Computed:      true,
+			PlanModifiers: []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 		},
 	}
 }

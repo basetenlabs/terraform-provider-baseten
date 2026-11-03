@@ -9,6 +9,8 @@ import (
 	"github.com/basetenlabs/baseten-go/client/managementapi"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -44,7 +46,7 @@ func modelScheduleSchemaAttributes() map[string]schema.Attribute {
 		autoscaling[name] = setting
 	}
 	return map[string]schema.Attribute{
-		"id":           schema.StringAttribute{Computed: true, MarkdownDescription: "Stable schedule ID assigned by Baseten."},
+		"id":           schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()}, MarkdownDescription: "Stable schedule ID assigned by Baseten."},
 		"cadence":      schema.StringAttribute{Required: true, MarkdownDescription: "`DAILY`, `HOURLY`, or `ONE_TIME`."},
 		"enabled":      schema.BoolAttribute{Required: true, MarkdownDescription: "Whether this schedule is enabled."},
 		"weekdays":     schema.SetAttribute{Optional: true, ElementType: types.StringType, MarkdownDescription: "Weekdays for recurring schedules, such as `MONDAY` and `FRIDAY`. Omit for `ONE_TIME`."},
