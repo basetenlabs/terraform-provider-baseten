@@ -164,7 +164,7 @@ autoscaling_schedules = {
 				resource.TestCheckResourceAttr("baseten_model.test", "environments.production.autoscaling_schedules.business.id", "schedule-1"),
 				resource.TestCheckResourceAttr("baseten_model.test", "environments.production.autoscaling_schedules.%", "1"),
 			)},
-			{Config: config(`autoscaling = { min_replica = 1 }`), Check: resource.ComposeTestCheckFunc(
+			{Config: config(`autoscaling_schedule_timezone = "Etc/UTC"`), Check: resource.ComposeTestCheckFunc(
 				resource.TestCheckResourceAttr("baseten_model.test", "environments.production.autoscaling_schedules.business.id", "schedule-1"),
 				resource.TestCheckResourceAttr("baseten_model.test", "environments.production.request_backpressure_policy", "REJECT_ON_FULL"),
 			)},
