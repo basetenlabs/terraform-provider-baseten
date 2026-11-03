@@ -52,6 +52,56 @@ resource "baseten_model" "qwen_2_5_3b" {
 }
 ```
 
+### Scheduled autoscaling and request backpressure
+
+```terraform
+resource "baseten_model" "scheduled" {
+  name = "Phi 3 Mini"
+
+  environments = {
+    production = {
+      request_backpressure_policy   = "REJECT_ON_FULL"
+      autoscaling_schedule_timezone = "America/Los_Angeles"
+      autoscaling_schedules = {
+        business_hours = {
+          cadence      = "DAILY"
+          enabled      = true
+          weekdays     = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
+          start_hour   = 9
+          start_minute = 0
+          end_hour     = 17
+          end_minute   = 0
+          autoscaling = {
+            min_replica = 2
+            max_replica = 20
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Schedule names must be unique within an environment. Updating an entry keeps its
+server-assigned ID; changing a name deletes the old schedule and creates a new
+one. A configured `autoscaling_schedules` map owns the whole collection, including
+schedules previously created outside Terraform. Removing a key deletes that
+schedule. Set the map to `{}` to delete every schedule, or omit it to keep the
+current collection. Omitting a setting inside a schedule's `autoscaling` object
+removes that override, so it follows the environment's current value.
+
+`DAILY` schedules require weekdays, hours, and minutes. `HOURLY` schedules require
+weekdays and minutes; omit both hours to repeat the window every hour.
+`ONE_TIME` schedules use RFC 3339 `start_at` and `end_at` timestamps instead of
+weekdays and hour/minute fields. Baseten requires a new one-time schedule to start
+in the future. The evaluated schedule and serving replica count are deliberately
+excluded from state, so crossing a schedule boundary does not produce plan drift.
+
+Set `request_backpressure_policy` to `QUEUE_ON_FULL` or `REJECT_ON_FULL`, or to
+`""` to clear the policy. Omitting it preserves the current policy. To clear the
+schedule timezone, set `autoscaling_schedule_timezone = ""` in the same apply
+that removes every schedule.
+
 ### Managed, from a model directory
 
 ```terraform
@@ -302,7 +352,10 @@ apply it first. To stop managing something without deleting it, use
 Optional:
 
 - `autoscaling` (Attributes) Autoscaling settings for the environment. Attributes left out keep their current values rather than resetting to Baseten's defaults. (see [below for nested schema](#nestedatt--environments--autoscaling))
+- `autoscaling_schedule_timezone` (String) IANA timezone shared by autoscaling schedules, such as `America/Los_Angeles`. Required when creating the first recurring schedule. Omission preserves the current timezone. An empty string clears it, which requires removing every schedule.
+- `autoscaling_schedules` (Attributes Map) Autoscaling schedules keyed by unique schedule name. When configured, manages the entire collection: removing a key deletes that schedule, and `{}` clears all schedules. Omission leaves schedules unchanged. Schedule IDs are preserved when updating an existing name. Evaluated, time-dependent autoscaling state is not stored. (see [below for nested schema](#nestedatt--environments--autoscaling_schedules))
 - `promotion` (Attributes) Promotion settings for the environment. Attributes left out keep their current values rather than resetting to Baseten's defaults. (see [below for nested schema](#nestedatt--environments--promotion))
+- `request_backpressure_policy` (String) Request backpressure policy: `QUEUE_ON_FULL` or `REJECT_ON_FULL`. Set to an empty string to clear the policy. Omission preserves the current policy.
 
 Read-Only:
 
@@ -322,6 +375,48 @@ Optional:
 - `scale_down_delay` (Number) Waiting period before scaling down any active replica, in seconds.
 - `target_in_flight_tokens` (Number) Target number of in-flight tokens for autoscaling decisions. Early access only. Baseten has no way to clear this once set.
 - `target_utilization_percentage` (Number) Target utilization percentage for scaling up and down.
+
+
+<a id="nestedatt--environments--autoscaling_schedules"></a>
+### Nested Schema for `environments.autoscaling_schedules`
+
+Required:
+
+- `autoscaling` (Attributes) Autoscaling overrides during this schedule. Omitted optional overrides inherit the environment value. (see [below for nested schema](#nestedatt--environments--autoscaling_schedules--autoscaling))
+- `cadence` (String) `DAILY`, `HOURLY`, or `ONE_TIME`.
+- `enabled` (Boolean) Whether this schedule is enabled.
+
+Optional:
+
+- `end_at` (String) Exclusive end of a ONE_TIME schedule, in RFC 3339 format.
+- `end_hour` (Number) Ending hour (0–23). Required for DAILY; omit both hours for unrestricted HOURLY schedules.
+- `end_minute` (Number) Ending minute (0–59), required for recurring schedules.
+- `start_at` (String) Inclusive start of a ONE_TIME schedule, in RFC 3339 format. New schedules must start in the future.
+- `start_hour` (Number) Starting hour (0–23). Required for DAILY; omit both hours for unrestricted HOURLY schedules.
+- `start_minute` (Number) Starting minute (0–59), required for recurring schedules.
+- `weekdays` (Set of String) Weekdays for recurring schedules, such as `MONDAY` and `FRIDAY`. Omit for `ONE_TIME`.
+
+Read-Only:
+
+- `id` (String) Stable schedule ID assigned by Baseten.
+
+<a id="nestedatt--environments--autoscaling_schedules--autoscaling"></a>
+### Nested Schema for `environments.autoscaling_schedules.autoscaling`
+
+Required:
+
+- `max_replica` (Number) Number of replicas during this schedule.
+- `min_replica` (Number) Number of replicas during this schedule.
+
+Optional:
+
+- `autoscaling_window` (Number) Schedule override. Omit to inherit the environment value.
+- `concurrency_target` (Number) Schedule override. Omit to inherit the environment value.
+- `max_scale_down_rate` (Number) Schedule override. Omit to inherit the environment value.
+- `scale_down_delay` (Number) Schedule override. Omit to inherit the environment value.
+- `target_in_flight_tokens` (Number) Schedule override. Omit to inherit the environment value.
+- `target_utilization_percentage` (Number) Schedule override. Omit to inherit the environment value.
+
 
 
 <a id="nestedatt--environments--promotion"></a>
