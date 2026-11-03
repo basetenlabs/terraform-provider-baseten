@@ -8,6 +8,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 )
@@ -21,10 +25,13 @@ import (
 // objects stay as types.Object rather than Go structs because a newly added
 // entry plans them unknown, which a struct pointer cannot represent.
 type modelEnvironmentModel struct {
-	Autoscaling      types.Object `tfsdk:"autoscaling"`
-	Promotion        types.Object `tfsdk:"promotion"`
-	CreatedAt        types.String `tfsdk:"created_at"`
-	InstanceTypeName types.String `tfsdk:"instance_type_name"`
+	Autoscaling                 types.Object `tfsdk:"autoscaling"`
+	Promotion                   types.Object `tfsdk:"promotion"`
+	RequestBackpressurePolicy   types.String `tfsdk:"request_backpressure_policy"`
+	AutoscalingSchedules        types.Map    `tfsdk:"autoscaling_schedules"`
+	AutoscalingScheduleTimezone types.String `tfsdk:"autoscaling_schedule_timezone"`
+	CreatedAt                   types.String `tfsdk:"created_at"`
+	InstanceTypeName            types.String `tfsdk:"instance_type_name"`
 }
 
 type modelAutoscalingModel struct {
@@ -60,23 +67,45 @@ type modelRollingDeployModel struct {
 
 func modelEnvironmentSchemaAttributes() map[string]schema.Attribute {
 	return map[string]schema.Attribute{
+		"request_backpressure_policy": schema.StringAttribute{
+			MarkdownDescription: "Request backpressure policy: `QUEUE_ON_FULL` or `REJECT_ON_FULL`. Set to an empty string to clear the policy. Omission preserves the current policy.",
+			Optional:            true,
+			Computed:            true,
+			PlanModifiers:       []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
+		},
+		"autoscaling_schedule_timezone": schema.StringAttribute{
+			MarkdownDescription: "IANA timezone shared by autoscaling schedules, such as `America/Los_Angeles`. Required when creating the first recurring schedule. Omission preserves the current timezone. An empty string clears it, which requires removing every schedule.",
+			Optional:            true,
+			Computed:            true,
+			PlanModifiers:       []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
+		},
+		"autoscaling_schedules": schema.MapNestedAttribute{
+			MarkdownDescription: "Autoscaling schedules keyed by unique schedule name. When configured, manages the entire collection: removing a key deletes that schedule, and `{}` clears all schedules. Omission leaves schedules unchanged. Schedule IDs are preserved when updating an existing name. Evaluated, time-dependent autoscaling state is not stored.",
+			Optional:            true,
+			Computed:            true,
+			PlanModifiers:       []planmodifier.Map{mapplanmodifier.UseNonNullStateForUnknown()},
+			NestedObject:        schema.NestedAttributeObject{Attributes: modelScheduleSchemaAttributes()},
+		},
 		"autoscaling": schema.SingleNestedAttribute{
 			MarkdownDescription: "Autoscaling settings for the environment. Attributes left out keep their " +
 				"current values rather than resetting to Baseten's defaults.",
-			Optional:   true,
-			Computed:   true,
-			Attributes: modelAutoscalingSchemaAttributes(),
+			Optional:      true,
+			Computed:      true,
+			PlanModifiers: []planmodifier.Object{objectplanmodifier.UseNonNullStateForUnknown()},
+			Attributes:    modelAutoscalingSchemaAttributes(),
 		},
 		"promotion": schema.SingleNestedAttribute{
 			MarkdownDescription: "Promotion settings for the environment. Attributes left out keep their " +
 				"current values rather than resetting to Baseten's defaults.",
-			Optional:   true,
-			Computed:   true,
-			Attributes: modelPromotionSchemaAttributes(),
+			Optional:      true,
+			Computed:      true,
+			PlanModifiers: []planmodifier.Object{objectplanmodifier.UseNonNullStateForUnknown()},
+			Attributes:    modelPromotionSchemaAttributes(),
 		},
 		"created_at": schema.StringAttribute{
 			MarkdownDescription: "Time the environment was created, in ISO 8601 format.",
 			Computed:            true,
+			PlanModifiers:       []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 		},
 		// Deployment status, replica counts, and in-flight promotions are deliberately
 		// absent: they move continuously without anyone asking, so Terraform would report
@@ -85,7 +114,8 @@ func modelEnvironmentSchemaAttributes() map[string]schema.Attribute {
 		"instance_type_name": schema.StringAttribute{
 			MarkdownDescription: "Display name of the instance type serving the environment. Read-only, " +
 				"because Baseten copies the instance type onto a new deployment rather than changing it in place.",
-			Computed: true,
+			Computed:      true,
+			PlanModifiers: []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 		},
 	}
 }
@@ -282,6 +312,13 @@ func modelEnvironmentFromAPI(ctx context.Context, environment *managementapi.Env
 		CreatedAt:        types.StringValue(environment.CreatedAt.Format(time.RFC3339)),
 		InstanceTypeName: types.StringValue(environment.InstanceType.Name),
 	}
+	entry.RequestBackpressurePolicy = types.StringValue("")
+	if policy := environment.RequestBackpressureSettings.Policy; policy != nil {
+		entry.RequestBackpressurePolicy = types.StringValue(string(*policy))
+	}
+	var scheduleDiags diag.Diagnostics
+	entry.AutoscalingSchedules, entry.AutoscalingScheduleTimezone, scheduleDiags = modelSchedulesFromAPI(ctx, environment.AutoscalingSchedules)
+	diags.Append(scheduleDiags...)
 	return entry, diags
 }
 
@@ -313,14 +350,14 @@ func modelAutoscalingUpdate(ctx context.Context, object types.Object) (*manageme
 
 // modelPromotionUpdate builds the promotion payload, splitting the provider's
 // single rolling_deploy attribute back into the API's boolean and config.
-func modelPromotionUpdate(ctx context.Context, object types.Object) (*managementapi.UpdatePromotionSettings, diag.Diagnostics) {
+func modelPromotionUpdate(ctx context.Context, object types.Object) (*managementapi.UpdateModelPromotionSettings, diag.Diagnostics) {
 	var settings modelPromotionModel
 	diags := object.As(ctx, &settings, modelObjectAsOptions)
 	if diags.HasError() {
 		return nil, diags
 	}
 
-	update := managementapi.UpdatePromotionSettings{
+	update := managementapi.UpdateModelPromotionSettings{
 		RedeployOnPromotion:   modelBoolPointer(settings.RedeployOnPromotion),
 		RampUpWhilePromoting:  modelBoolPointer(settings.RampUpWhilePromoting),
 		RampUpDurationSeconds: modelIntPointer(settings.RampUpDurationSeconds),
