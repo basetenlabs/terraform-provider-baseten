@@ -279,7 +279,7 @@ func (r *apiKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	// there is no team-scoped listing to branch to: only creation has a team
 	// route. One listing already covers team keys, since the endpoint returns the
 	// caller's personal keys alongside every non-personal key they can manage.
-	keys, err := r.client.API().GetApiKeys(ctx)
+	keys, err := r.client.API().GetApiKeys(ctx, managementapi.GetV1ApiKeysParams{})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read Baseten API keys", err.Error())
 		return

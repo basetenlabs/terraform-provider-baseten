@@ -277,8 +277,9 @@ func modelPushResolveSource(ctx context.Context, push modelPushModel, modelName 
 
 	source.options.DeploymentName = push.DeploymentName.ValueString()
 	source.options.EnvironmentName = push.Environment.ValueString()
+	source.options.PreserveEnvInstanceType = true
 	if modelIsSet(push.PreserveEnvInstanceType) {
-		source.options.OverrideEnvInstanceType = !push.PreserveEnvInstanceType.ValueBool()
+		source.options.PreserveEnvInstanceType = push.PreserveEnvInstanceType.ValueBool()
 	}
 	if modelIsSet(push.DeployTimeoutMinutes) {
 		source.options.DeployTimeoutMinutes = int(push.DeployTimeoutMinutes.ValueInt64())

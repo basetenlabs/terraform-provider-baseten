@@ -89,6 +89,33 @@ func TestModelPushDeletionProtectionWithoutPushWarns(t *testing.T) {
 	}
 }
 
+func TestModelPushSourcePreservesInstanceTypeDefault(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured types.Bool
+		want       bool
+	}{
+		{"omitted", types.BoolNull(), true},
+		{"unknown", types.BoolUnknown(), true},
+		{"preserve", types.BoolValue(true), true},
+		{"replace", types.BoolValue(false), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source, diags := modelPushResolveSource(t.Context(), modelPushModel{
+				Config: testModelConfig(t, "whisper"), Environment: types.StringValue("production"),
+				PreserveEnvInstanceType: test.configured,
+			}, "whisper")
+			if diags.HasError() {
+				t.Fatal(diags)
+			}
+			defer source.Close()
+			if source.options.PreserveEnvInstanceType != test.want {
+				t.Fatalf("preserve instance type = %v, want %v", source.options.PreserveEnvInstanceType, test.want)
+			}
+		})
+	}
+}
+
 func TestModelPushSourceHashesDirectory(t *testing.T) {
 	dir := testModelDir(t, map[string]string{
 		"config.yaml":    "model_name: whisper\n",

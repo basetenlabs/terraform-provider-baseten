@@ -260,6 +260,40 @@ func TestModelScheduleValidation(t *testing.T) {
 	}
 }
 
+func TestModelScheduleTimestampRefresh(t *testing.T) {
+	current := testSchedule(t, "ONE_TIME")
+	current.ID = types.StringValue("once-id")
+	previous := current
+	previous.StartAt = types.StringValue("2030-01-01T10:00:00+01:00")
+	previous.EndAt = types.StringValue("2030-01-01T11:00:00+01:00")
+	result, diags := modelPreserveScheduleTimes(t.Context(),
+		testScheduleMap(t, map[string]modelScheduleModel{"event": current}),
+		testScheduleMap(t, map[string]modelScheduleModel{"event": previous}))
+	if diags.HasError() {
+		t.Fatal(diags)
+	}
+	var entries map[string]modelScheduleModel
+	if diags := result.ElementsAs(t.Context(), &entries, false); diags.HasError() {
+		t.Fatal(diags)
+	}
+	if !entries["event"].StartAt.Equal(previous.StartAt) || !entries["event"].EndAt.Equal(previous.EndAt) {
+		t.Fatal("equivalent timestamp formatting would cause a perpetual diff")
+	}
+	current.StartAt = types.StringValue("2030-01-02T09:00:00Z")
+	result, diags = modelPreserveScheduleTimes(t.Context(),
+		testScheduleMap(t, map[string]modelScheduleModel{"event": current}),
+		testScheduleMap(t, map[string]modelScheduleModel{"event": previous}))
+	if diags.HasError() {
+		t.Fatal(diags)
+	}
+	if diags := result.ElementsAs(t.Context(), &entries, false); diags.HasError() {
+		t.Fatal(diags)
+	}
+	if !entries["event"].StartAt.Equal(current.StartAt) {
+		t.Fatal("a real timestamp change was hidden")
+	}
+}
+
 func testAPISchedules(t *testing.T, body string) *managementapi.EnvironmentAutoscalingSchedules {
 	t.Helper()
 	var collection managementapi.EnvironmentAutoscalingSchedules
