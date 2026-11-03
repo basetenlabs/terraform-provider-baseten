@@ -208,6 +208,11 @@ func (r *modelResource) ValidateConfig(ctx context.Context, req resource.Validat
 	}
 
 	validateModelIdentity(config.identity(), &resp.Diagnostics)
+	environments, environmentDiags := modelEnvironmentEntries(ctx, config.Environments)
+	resp.Diagnostics.Append(environmentDiags...)
+	for _, entry := range environments {
+		modelValidateScheduleSettings(ctx, entry, &resp.Diagnostics)
+	}
 
 	push, hasPush, diags := modelPushEntry(ctx, config.Push)
 	resp.Diagnostics.Append(diags...)
@@ -597,6 +602,8 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		}
 		entry, entryDiags := modelEnvironmentFromAPI(ctx, environment)
 		resp.Diagnostics.Append(entryDiags...)
+		entry.AutoscalingSchedules, entryDiags = modelPreserveScheduleTimes(ctx, entry.AutoscalingSchedules, stateEnvironments[name].AutoscalingSchedules)
+		resp.Diagnostics.Append(entryDiags...)
 		entries[name] = entry
 	}
 	if resp.Diagnostics.HasError() {
@@ -908,19 +915,32 @@ func (r *modelResource) reconcileEnvironments(
 		}
 
 		environment, found := existing[name]
-		switch {
-		case !found:
+		var currentSchedules *managementapi.EnvironmentAutoscalingSchedules
+		if found {
+			currentSchedules = environment.AutoscalingSchedules
+		}
+		schedules, scheduleDiags := modelScheduleUpdate(ctx, plannedEntry.AutoscalingSchedules, plannedEntry.AutoscalingScheduleTimezone, currentSchedules)
+		diags.Append(scheduleDiags...)
+		backpressure := modelBackpressureUpdate(plannedEntry.RequestBackpressurePolicy)
+		if diags.HasError() {
+			return types.MapNull(environmentType), diags
+		}
+		if !found {
 			created, err := r.client.API().PostModelsEnvironments(ctx, modelID, managementapi.CreateEnvironmentRequest{
-				Name:                name,
-				AutoscalingSettings: autoscaling,
-				PromotionSettings:   promotion,
+				Name:                        name,
+				AutoscalingSettings:         autoscaling,
+				PromotionSettings:           promotion,
+				RequestBackpressureSettings: backpressure,
 			})
 			if err != nil {
 				diags.AddError(fmt.Sprintf("Unable to create Baseten environment %q", name), err.Error())
 				return types.MapNull(environmentType), diags
 			}
 			environment = created
-		case autoscaling != nil || promotion != nil:
+		}
+		// Schedules are only supported by PATCH, so a new environment needs a
+		// second request. Other settings were already sent on its create.
+		if (found && (autoscaling != nil || promotion != nil || backpressure != nil)) || schedules != nil {
 			if promotion != nil && environment.InProgressPromotion != nil {
 				diags.AddWarning(
 					fmt.Sprintf("Promotion in progress on environment %q", name),
@@ -928,10 +948,15 @@ func (r *modelResource) reconcileEnvironments(
 						"already running may not observe them.",
 				)
 			}
-			response, err := r.client.API().PatchModelsEnvironments(ctx, modelID, name, managementapi.UpdateEnvironmentRequest{
-				AutoscalingSettings: autoscaling,
-				PromotionSettings:   promotion,
-			})
+			update := managementapi.UpdateEnvironmentRequest{
+				AutoscalingScheduleSettings: schedules,
+			}
+			if found {
+				update.AutoscalingSettings = autoscaling
+				update.PromotionSettings = promotion
+				update.RequestBackpressureSettings = backpressure
+			}
+			response, err := r.client.API().PatchModelsEnvironments(ctx, modelID, name, update)
 			if err != nil {
 				diags.AddError(fmt.Sprintf("Unable to update Baseten environment %q", name), err.Error())
 				return types.MapNull(environmentType), diags
@@ -942,14 +967,19 @@ func (r *modelResource) reconcileEnvironments(
 					response.Message,
 				)
 			}
-			// The PATCH response carries only a status, and settings apply
-			// asynchronously, so re-read to pick up everything not configured.
+			// Serving settings apply asynchronously, so re-read to pick up
+			// everything not configured in the plan.
 			refreshed, err := r.client.API().GetModelsEnvironmentsEnvName(ctx, modelID, name)
 			if err != nil {
 				diags.AddError(fmt.Sprintf("Unable to read Baseten environment %q", name), err.Error())
 				return types.MapNull(environmentType), diags
 			}
 			environment = refreshed
+			// The mutation response carries newly assigned schedule IDs. The
+			// serving deployment read may not have caught up to the mutation yet.
+			if schedules != nil && response.Environment.AutoscalingSchedules != nil {
+				environment.AutoscalingSchedules = response.Environment.AutoscalingSchedules
+			}
 		}
 
 		fetchedEntry, fetchedDiags := modelEnvironmentFromAPI(ctx, environment)
@@ -979,6 +1009,18 @@ func (r *modelResource) reconcileEnvironments(
 		}
 		fetchedEntry.Autoscaling = mergedAutoscaling
 		fetchedEntry.Promotion = mergedPromotion
+		mergedSchedules, scheduleMergeDiags := modelMergeSchedules(ctx, plannedEntry.AutoscalingSchedules, fetchedEntry.AutoscalingSchedules)
+		diags.Append(scheduleMergeDiags...)
+		fetchedEntry.AutoscalingSchedules = mergedSchedules
+		if !plannedEntry.AutoscalingScheduleTimezone.IsUnknown() {
+			fetchedEntry.AutoscalingScheduleTimezone = plannedEntry.AutoscalingScheduleTimezone
+		}
+		if !plannedEntry.RequestBackpressurePolicy.IsUnknown() {
+			fetchedEntry.RequestBackpressurePolicy = plannedEntry.RequestBackpressurePolicy
+		}
+		if diags.HasError() {
+			return types.MapNull(environmentType), diags
+		}
 		entries[name] = fetchedEntry
 	}
 
@@ -1035,7 +1077,7 @@ func modelEnvironmentEntries(ctx context.Context, environments types.Map) (map[s
 	return entries, diags
 }
 
-func modelSortedNames(entries map[string]modelEnvironmentModel) []string {
+func modelSortedNames[T any](entries map[string]T) []string {
 	names := make([]string, 0, len(entries))
 	for name := range entries {
 		names = append(names, name)

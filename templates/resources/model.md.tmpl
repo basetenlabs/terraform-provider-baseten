@@ -15,6 +15,30 @@ description: |-
 
 {{ tffile "examples/resources/baseten_model/resource-adopted.tf" }}
 
+### Scheduled autoscaling and request backpressure
+
+{{ tffile "examples/resources/baseten_model/resource-schedules.tf" }}
+
+Schedule names must be unique within an environment. Updating an entry keeps its
+server-assigned ID; changing a name deletes the old schedule and creates a new
+one. A configured `autoscaling_schedules` map owns the whole collection, including
+schedules previously created outside Terraform. Removing a key deletes that
+schedule. Set the map to `{}` to delete every schedule, or omit it to keep the
+current collection. Omitting a setting inside a schedule's `autoscaling` object
+removes that override, so it follows the environment's current value.
+
+`DAILY` schedules require weekdays, hours, and minutes. `HOURLY` schedules require
+weekdays and minutes; omit both hours to repeat the window every hour.
+`ONE_TIME` schedules use RFC 3339 `start_at` and `end_at` timestamps instead of
+weekdays and hour/minute fields. Baseten requires a new one-time schedule to start
+in the future. The evaluated schedule and serving replica count are deliberately
+excluded from state, so crossing a schedule boundary does not produce plan drift.
+
+Set `request_backpressure_policy` to `QUEUE_ON_FULL` or `REJECT_ON_FULL`, or to
+`""` to clear the policy. Omitting it preserves the current policy. To clear the
+schedule timezone, set `autoscaling_schedule_timezone = ""` in the same apply
+that removes every schedule.
+
 ### Managed, from a model directory
 
 {{ tffile "examples/resources/baseten_model/resource-managed-dir.tf" }}

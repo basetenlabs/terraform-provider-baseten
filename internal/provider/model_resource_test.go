@@ -1297,6 +1297,9 @@ func testModelEnvironments(t *testing.T, entries map[string]modelEnvironmentMode
 
 	// A zero-value nested object has no attribute types, so it cannot convert.
 	for name, entry := range entries {
+		if entry.AutoscalingSchedules.ElementType(t.Context()) == nil {
+			entry.AutoscalingSchedules = types.MapNull(modelScheduleObjectType())
+		}
 		if len(entry.Autoscaling.AttributeTypes(t.Context())) == 0 {
 			entry.Autoscaling = types.ObjectNull(attrTypesOf(modelAutoscalingSchemaAttributes()))
 		}
@@ -1347,7 +1350,7 @@ func testAPIEnvironment(t *testing.T, name string, minReplica int) managementapi
 			MaxReplica:        4,
 			ConcurrencyTarget: 1,
 		},
-		PromotionSettings: managementapi.PromotionSettings{},
+		PromotionSettings: managementapi.ModelPromotionSettings{},
 		InstanceType:      managementapi.InstanceType{Id: "1x2", Name: "1x2"},
 	}
 }
