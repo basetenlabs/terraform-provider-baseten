@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/basetenlabs/baseten-go/client/managementapi"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -147,7 +148,7 @@ func TestModelResourceCreateWithSchedules(t *testing.T) {
 		}}),
 	})}
 	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
-	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: modelSchema, Raw: plan.Raw}}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatal(resp.Diagnostics)
 	}
@@ -257,6 +258,110 @@ func TestModelScheduleValidation(t *testing.T) {
 	modelValidateScheduleSettings(t.Context(), modelEnvironmentModel{RequestBackpressurePolicy: types.StringValue("invalid"), AutoscalingSchedules: types.MapUnknown(modelScheduleObjectType())}, &diags)
 	if !diags.HasError() {
 		t.Fatal("invalid backpressure policy accepted")
+	}
+}
+
+func TestModelScheduleValidationPartialUnknowns(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		change    func(*modelScheduleModel)
+		wantError bool
+	}{
+		{"unknown weekday element", func(s *modelScheduleModel) {
+			s.Weekdays, _ = types.SetValue(types.StringType, []attr.Value{types.StringValue("MONDAY"), types.StringUnknown()})
+		}, false},
+		{"invalid known weekday alongside unknown", func(s *modelScheduleModel) {
+			s.Weekdays, _ = types.SetValue(types.StringType, []attr.Value{types.StringValue("monday"), types.StringUnknown()})
+		}, true},
+		{"empty weekdays", func(s *modelScheduleModel) { s.Weekdays, _ = types.SetValue(types.StringType, nil) }, true},
+		{"null weekday element", func(s *modelScheduleModel) {
+			s.Weekdays, _ = types.SetValue(types.StringType, []attr.Value{types.StringNull()})
+		}, true},
+		{"unknown start hour", func(s *modelScheduleModel) { s.StartHour = types.Int64Unknown(); s.EndHour = types.Int64Null() }, false},
+		{"unknown end hour", func(s *modelScheduleModel) { s.StartHour = types.Int64Null(); s.EndHour = types.Int64Unknown() }, false},
+		{"resolved absent hours", func(s *modelScheduleModel) { s.StartHour = types.Int64Null(); s.EndHour = types.Int64Null() }, false},
+		{"resolved unpaired hours", func(s *modelScheduleModel) { s.StartHour = types.Int64Value(9); s.EndHour = types.Int64Null() }, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			schedule := testSchedule(t, "HOURLY")
+			test.change(&schedule)
+			var diags diag.Diagnostics
+			modelValidateScheduleSettings(t.Context(), modelEnvironmentModel{AutoscalingSchedules: testScheduleMap(t, map[string]modelScheduleModel{"burst": schedule})}, &diags)
+			if diags.HasError() != test.wantError {
+				t.Fatalf("diagnostics = %v, want error %t", diags, test.wantError)
+			}
+		})
+	}
+}
+
+// A saved plan must not make omitted settings authoritative when another
+// client changes the environment before apply.
+func TestModelOmittedSchedulesPreserveExternalChanges(t *testing.T) {
+	old := testAPIEnvironment(t, "production", 1)
+	old.AutoscalingSchedules = testAPISchedules(t, `{"timezone":"UTC","schedules":[{"id":"old-id","name":"business","cadence":"HOURLY","enabled":false,"weekdays":["MONDAY"],"start_minute":0,"end_minute":0,"autoscaling_settings":{"min_replica":1,"max_replica":3}}]}`)
+	oldPolicy := managementapi.RequestBackpressurePolicy_REJECT_ON_FULL
+	old.RequestBackpressureSettings.Policy = &oldPolicy
+	live := old
+	// The old schedule was removed and replaced outside Terraform after plan.
+	live.AutoscalingSchedules = testAPISchedules(t, `{"timezone":"Europe/London","schedules":[{"id":"external-id","name":"external","cadence":"HOURLY","enabled":true,"weekdays":["FRIDAY"],"start_minute":5,"end_minute":10,"autoscaling_settings":{"min_replica":2,"max_replica":4}}]}`)
+	livePolicy := managementapi.RequestBackpressurePolicy_QUEUE_ON_FULL
+	live.RequestBackpressureSettings.Policy = &livePolicy
+	r, fake, modelSchema := testModelResource(t, map[string]any{
+		"GET /v1/models/model-1/environments": managementapi.Environments{Environments: []managementapi.Environment{live}},
+	})
+	entry, diags := modelEnvironmentFromAPI(t.Context(), &old)
+	if diags.HasError() {
+		t.Fatal(diags)
+	}
+	prior := modelResourceModel{ID: types.StringValue("model-1"), Name: types.StringValue("whisper"), EnvironmentDeletionProtection: types.BoolValue(true), Environments: testModelEnvironments(t, map[string]modelEnvironmentModel{"production": entry})}
+	for _, changed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no-op", true: "update"}[changed], func(t *testing.T) {
+			planned := prior
+			planned.EnvironmentDeletionProtection = types.BoolValue(!changed)
+			config := planned
+			config.Environments = testModelEnvironments(t, map[string]modelEnvironmentModel{"production": {}})
+			plan := tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)}
+			resp := &fwresource.ModifyPlanResponse{Plan: plan}
+			r.ModifyPlan(t.Context(), fwresource.ModifyPlanRequest{Plan: plan, Config: tfsdk.Config{Schema: modelSchema, Raw: testModelValue(t, modelSchema, config)}, State: tfsdk.State{Schema: modelSchema, Raw: testModelValue(t, modelSchema, prior)}}, resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatal(resp.Diagnostics)
+			}
+			if !changed {
+				if !resp.Plan.Raw.Equal(plan.Raw) {
+					t.Fatal("no-op plan changed")
+				}
+				return
+			}
+			if diags := resp.Plan.Get(t.Context(), &planned); diags.HasError() {
+				t.Fatal(diags)
+			}
+			entries, diags := modelEnvironmentEntries(t.Context(), planned.Environments)
+			if diags.HasError() {
+				t.Fatal(diags)
+			}
+			got := entries["production"]
+			if !got.AutoscalingSchedules.IsUnknown() || !got.AutoscalingScheduleTimezone.IsUnknown() || !got.RequestBackpressurePolicy.IsUnknown() {
+				t.Fatal("omitted settings were frozen in the update plan")
+			}
+			// Keep unrelated legacy settings out of this reconciliation request.
+			got.Autoscaling = types.ObjectNull(attrTypesOf(modelAutoscalingSchemaAttributes()))
+			got.Promotion = types.ObjectNull(attrTypesOf(modelPromotionSchemaAttributes()))
+			result, diags := r.reconcileEnvironments(t.Context(), "model-1", testModelEnvironments(t, map[string]modelEnvironmentModel{"production": got}), config.Environments, prior.Environments, false)
+			if diags.HasError() {
+				t.Fatal(diags)
+			}
+			entries, diags = modelEnvironmentEntries(t.Context(), result)
+			if diags.HasError() {
+				t.Fatal(diags)
+			}
+			got = entries["production"]
+			if len(got.AutoscalingSchedules.Elements()) != 1 || got.AutoscalingSchedules.Elements()["external"] == nil || got.AutoscalingScheduleTimezone.ValueString() != "Europe/London" || got.RequestBackpressurePolicy.ValueString() != "QUEUE_ON_FULL" {
+				t.Fatalf("external changes lost: %+v", got)
+			}
+			if len(fake.requestsTo("PATCH", "/v1/models/model-1/environments/production")) != 0 {
+				t.Fatal("omitted settings caused a mutation")
+			}
+		})
 	}
 }
 

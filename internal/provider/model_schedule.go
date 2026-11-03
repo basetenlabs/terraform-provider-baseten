@@ -338,13 +338,15 @@ func modelValidateScheduleSettings(ctx context.Context, entry modelEnvironmentMo
 				invalid("recurring schedules cannot have start_at or end_at.")
 			}
 			if !schedule.Weekdays.IsUnknown() {
-				var weekdays []managementapi.AutoscalingScheduleWeekday
-				diags.Append(schedule.Weekdays.ElementsAs(ctx, &weekdays, false)...)
+				weekdays := schedule.Weekdays.Elements()
 				if len(weekdays) == 0 {
 					invalid("recurring schedules require weekdays.")
 				}
 				for _, weekday := range weekdays {
-					if !weekday.Valid() {
+					if weekday.IsUnknown() {
+						continue
+					}
+					if weekday.IsNull() || !managementapi.AutoscalingScheduleWeekday(weekday.(types.String).ValueString()).Valid() {
 						invalid("weekdays must be uppercase weekday names.")
 					}
 				}
@@ -357,7 +359,7 @@ func modelValidateScheduleSettings(ctx context.Context, entry modelEnvironmentMo
 			if cadence == "DAILY" && (schedule.StartHour.IsNull() || schedule.EndHour.IsNull()) {
 				invalid("DAILY schedules require start_hour and end_hour.")
 			}
-			if cadence == "HOURLY" && schedule.StartHour.IsNull() != schedule.EndHour.IsNull() {
+			if cadence == "HOURLY" && !schedule.StartHour.IsUnknown() && !schedule.EndHour.IsUnknown() && schedule.StartHour.IsNull() != schedule.EndHour.IsNull() {
 				invalid("HOURLY schedules require both hours or neither hour.")
 			}
 			for _, hour := range []types.Int64{schedule.StartHour, schedule.EndHour} {

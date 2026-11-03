@@ -123,7 +123,7 @@ func TestModelResourceCreateUpsertsEnvironments(t *testing.T) {
 	})}
 
 	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
-	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: modelSchema, Raw: plan.Raw}}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
 	}
@@ -195,7 +195,7 @@ func TestModelResourceCreateResolvesTeamName(t *testing.T) {
 	})}
 
 	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
-	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: modelSchema, Raw: plan.Raw}}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
 	}
@@ -230,7 +230,7 @@ func TestModelResourceCreateMissingModelNamesIt(t *testing.T) {
 	})}
 
 	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
-	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: modelSchema, Raw: plan.Raw}}, resp)
 	if !resp.Diagnostics.HasError() {
 		t.Fatalf("got no error, want one for a model that does not exist")
 	}
@@ -327,7 +327,7 @@ func TestModelResourceReconcileSkipsProductionDeletion(t *testing.T) {
 	})
 	planned := testModelEnvironments(t, map[string]modelEnvironmentModel{})
 
-	_, diags := r.reconcileEnvironments(t.Context(), "model-1", planned, prior, true)
+	_, diags := r.reconcileEnvironments(t.Context(), "model-1", planned, planned, prior, true)
 	if diags.HasError() {
 		t.Fatalf("got diagnostics %v, want none", diags)
 	}
@@ -399,8 +399,9 @@ func TestModelResourceUpdateKeepsPlannedSettingsOverReadBack(t *testing.T) {
 	priorValue := testModelValue(t, modelSchema, prior)
 	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
 	r.Update(t.Context(), fwresource.UpdateRequest{
-		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
-		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+		Config: tfsdk.Config{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		Plan:   tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State:  tfsdk.State{Schema: modelSchema, Raw: priorValue},
 	}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
@@ -494,8 +495,9 @@ func TestModelResourceUpdateFailedPushKeepsSourceHash(t *testing.T) {
 	// returns early records nothing.
 	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
 	r.Update(t.Context(), fwresource.UpdateRequest{
-		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
-		State: state,
+		Config: tfsdk.Config{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		Plan:   tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State:  state,
 	}, resp)
 
 	if !resp.Diagnostics.HasError() {
@@ -584,8 +586,9 @@ func TestModelResourceUpdateDeployedPushRecordsFailedWait(t *testing.T) {
 	priorValue := testModelValue(t, modelSchema, prior)
 	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
 	r.Update(t.Context(), fwresource.UpdateRequest{
-		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
-		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+		Config: tfsdk.Config{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		Plan:   tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State:  tfsdk.State{Schema: modelSchema, Raw: priorValue},
 	}, resp)
 
 	if !resp.Diagnostics.HasError() {
@@ -757,7 +760,7 @@ func TestModelResourceCreateTakesOverExistingModel(t *testing.T) {
 	})}
 
 	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
-	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: modelSchema, Raw: plan.Raw}}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
 	}
@@ -818,7 +821,7 @@ func TestModelResourceCreatePushesNewModel(t *testing.T) {
 	})}
 
 	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: modelSchema}}
-	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan}, resp)
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: modelSchema, Raw: plan.Raw}}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
 	}
@@ -866,8 +869,9 @@ func TestModelResourceUpdateAddingPushAdoptsSource(t *testing.T) {
 	priorValue := testModelValue(t, modelSchema, prior)
 	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
 	r.Update(t.Context(), fwresource.UpdateRequest{
-		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
-		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+		Config: tfsdk.Config{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		Plan:   tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State:  tfsdk.State{Schema: modelSchema, Raw: priorValue},
 	}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("got diagnostics %v, want none", resp.Diagnostics)
@@ -947,8 +951,9 @@ func TestModelResourceUpdateEnvironmentFailurePushesNothing(t *testing.T) {
 	priorValue := testModelValue(t, modelSchema, prior)
 	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: modelSchema, Raw: priorValue}}
 	r.Update(t.Context(), fwresource.UpdateRequest{
-		Plan:  tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
-		State: tfsdk.State{Schema: modelSchema, Raw: priorValue},
+		Config: tfsdk.Config{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		Plan:   tfsdk.Plan{Schema: modelSchema, Raw: testModelValue(t, modelSchema, planned)},
+		State:  tfsdk.State{Schema: modelSchema, Raw: priorValue},
 	}, resp)
 
 	if !resp.Diagnostics.HasError() {

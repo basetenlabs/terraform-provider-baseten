@@ -318,6 +318,24 @@ func (r *modelResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 	}
 
 	r.modifyPushPlan(ctx, req, resp)
+	if resp.Diagnostics.HasError() || req.State.Raw.IsNull() || resp.Plan.Raw.Equal(req.State.Raw) {
+		return
+	}
+	// A real update may observe changes made after planning. Omitted settings
+	// must remain computed in that plan so apply can return their live values.
+	// Keep prior values on a no-op plan to avoid perpetual updates.
+	for name, entry := range configEnvironments {
+		base := path.Root("environments").AtMapKey(name)
+		if entry.AutoscalingSchedules.IsNull() {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, base.AtName("autoscaling_schedules"), types.MapUnknown(modelScheduleObjectType()))...)
+		}
+		if entry.AutoscalingScheduleTimezone.IsNull() {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, base.AtName("autoscaling_schedule_timezone"), types.StringUnknown())...)
+		}
+		if entry.RequestBackpressurePolicy.IsNull() {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, base.AtName("request_backpressure_policy"), types.StringUnknown())...)
+		}
+	}
 }
 
 // modifyPushPlan settles the source hash so the plan shows whether a push is
@@ -486,6 +504,8 @@ func (r *modelResource) Configure(ctx context.Context, req resource.ConfigureReq
 func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	var configured types.Map
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("environments"), &configured)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -546,7 +566,7 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 
 	// Nothing was managed before, so there is nothing to delete.
 	environments, diags := r.reconcileEnvironments(
-		ctx, model.Id, plan.Environments, types.MapNull(modelEnvironmentObjectType()), false)
+		ctx, model.Id, plan.Environments, configured, types.MapNull(modelEnvironmentObjectType()), false)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -624,6 +644,8 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	var plan, state modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	var configured types.Map
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("environments"), &configured)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -643,6 +665,7 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		ctx,
 		state.ID.ValueString(),
 		plan.Environments,
+		configured,
 		state.Environments,
 		!plan.EnvironmentDeletionProtection.ValueBool(),
 	)
@@ -882,7 +905,7 @@ func modelNotFoundError(plan modelResourceModel) diag.Diagnostic {
 func (r *modelResource) reconcileEnvironments(
 	ctx context.Context,
 	modelID string,
-	planned, prior types.Map,
+	planned, configured, prior types.Map,
 	deleteRemoved bool,
 ) (types.Map, diag.Diagnostics) {
 	environmentType := modelEnvironmentObjectType()
@@ -893,6 +916,8 @@ func (r *modelResource) reconcileEnvironments(
 	}
 	priorEntries, priorDiags := modelEnvironmentEntries(ctx, prior)
 	diags.Append(priorDiags...)
+	configuredEntries, configDiags := modelEnvironmentEntries(ctx, configured)
+	diags.Append(configDiags...)
 	if diags.HasError() {
 		return types.MapNull(environmentType), diags
 	}
@@ -919,9 +944,22 @@ func (r *modelResource) reconcileEnvironments(
 		if found {
 			currentSchedules = environment.AutoscalingSchedules
 		}
-		schedules, scheduleDiags := modelScheduleUpdate(ctx, plannedEntry.AutoscalingSchedules, plannedEntry.AutoscalingScheduleTimezone, currentSchedules)
+		// Plan modifiers may have reused prior computed values. Only configuration
+		// presence establishes ownership; an omitted setting must never be sent.
+		configuredEntry := configuredEntries[name]
+		desiredSchedules, desiredTimezone := plannedEntry.AutoscalingSchedules, plannedEntry.AutoscalingScheduleTimezone
+		if configuredEntry.AutoscalingSchedules.IsNull() {
+			desiredSchedules = types.MapNull(modelScheduleObjectType())
+		}
+		if configuredEntry.AutoscalingScheduleTimezone.IsNull() {
+			desiredTimezone = types.StringNull()
+		}
+		schedules, scheduleDiags := modelScheduleUpdate(ctx, desiredSchedules, desiredTimezone, currentSchedules)
 		diags.Append(scheduleDiags...)
-		backpressure := modelBackpressureUpdate(plannedEntry.RequestBackpressurePolicy)
+		var backpressure *managementapi.UpdateRequestBackpressureSettings
+		if !configuredEntry.RequestBackpressurePolicy.IsNull() {
+			backpressure = modelBackpressureUpdate(plannedEntry.RequestBackpressurePolicy)
+		}
 		if diags.HasError() {
 			return types.MapNull(environmentType), diags
 		}
