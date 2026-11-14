@@ -19,12 +19,12 @@ jobs:
     # `release` environment with reviewers and add `environment: release` here.
     steps:
       # Actions are pinned by digest, because this job holds the signing key.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: chainguard-actions/actions-checkout@37298d8de412b35988dd165ffae45f45b329d365 # v7.0.1
         with:
           # goreleaser reads earlier tags.
           fetch-depth: 0
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: chainguard-actions/actions-setup-go@a23f604fa6ac04bc887d814b1cf828c9fbaf51a7 # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
@@ -35,14 +35,14 @@ jobs:
         run: go test ./...
 
       - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        uses: chainguard-actions/crazy-max-ghaction-import-gpg@0f20ca9d8d4612864666b16a2b7521cbd1bf96f3 # v7.0.0
         id: import_gpg
         with:
           gpg_private_key: ${{ secrets.TERRAFORM_PRIVATE_KEY }}
           passphrase: ${{ secrets.TERRAFORM_PASSPHRASE }}
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        uses: chainguard-actions/goreleaser-goreleaser-action@88b2601cb06cd85470e6729b2d06a3f359bd275a # v7.2.3
         with:
           args: release --clean
         env:
