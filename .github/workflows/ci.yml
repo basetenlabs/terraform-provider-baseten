@@ -9,13 +9,13 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: chainguard-actions/actions-checkout@31bbccf724702f8a0dc7a3ed7db8fcca2066babc # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: chainguard-actions/actions-setup-go@320f6f2294d8e82641a27424fb8def0a2a1e80e6 # v5.6.0
         with:
           go-version-file: go.mod
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: chainguard-actions/hashicorp-setup-terraform@bf7eabe86d1befc2417b5a81e878313802fdbe2a # v3.1.2
         with:
           # The wrapper intercepts the terraform binary, which tfplugindocs and
           # the test harness both drive directly.
